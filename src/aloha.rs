@@ -3,13 +3,13 @@ use std::io::{Read, Write};
 use anyhow::{Ok, Result, bail};
 
 const MAGIC: &[u8; 6] = b"ALOHA1";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorType {
-    Gray,
-    Graya,
+    Grayscale,
+    GrayscaleAlpha,
     Rgb,
     Rgba,
     Indexed,
@@ -18,8 +18,8 @@ pub enum ColorType {
 impl ColorType {
     pub fn channels(&self) -> usize {
         match self {
-            Self::Gray | Self::Indexed => 1,
-            Self::Graya => 2,
+            Self::Grayscale | Self::Indexed => 1,
+            Self::GrayscaleAlpha => 2,
             Self::Rgb => 3,
             Self::Rgba => 4,
         }
@@ -34,10 +34,10 @@ impl From<&png::ColorType> for ColorType {
     fn from(value: &png::ColorType) -> Self {
         use png::ColorType::*;
         match value {
-            Grayscale => Self::Gray,
+            Grayscale => Self::Grayscale,
             Rgb => Self::Rgb,
             Indexed => Self::Indexed,
-            GrayscaleAlpha => Self::Graya,
+            GrayscaleAlpha => Self::GrayscaleAlpha,
             Rgba => Self::Rgba,
         }
     }
@@ -48,8 +48,8 @@ impl TryFrom<u8> for ColorType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(Self::Gray),
-            1 => Ok(Self::Graya),
+            0 => Ok(Self::Grayscale),
+            1 => Ok(Self::GrayscaleAlpha),
             2 => Ok(Self::Rgb),
             3 => Ok(Self::Rgba),
             4 => Ok(Self::Indexed),
@@ -62,8 +62,8 @@ impl From<&ColorType> for png::ColorType {
     fn from(value: &ColorType) -> Self {
         use png::ColorType::*;
         match value {
-            ColorType::Gray => Grayscale,
-            ColorType::Graya => GrayscaleAlpha,
+            ColorType::Grayscale => Grayscale,
+            ColorType::GrayscaleAlpha => GrayscaleAlpha,
             ColorType::Rgb => Rgb,
             ColorType::Rgba => Rgba,
             ColorType::Indexed => Indexed,
@@ -152,6 +152,10 @@ impl AlohaImage {
                 "Invalid bit depth for indexed color type: {}",
                 self.bit_depth as u8
             );
+        }
+
+        if self.width < 1 || self.height < 1 {
+            bail!("Invalid image resolution: {}x{}", self.width, self.height);
         }
 
         let actual_size = self.data.len();
@@ -276,11 +280,11 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     let metadata = serde_json::from_slice::<Metadata>(&meta_bytes)?;
 
     let data_len = read_u64(&mut r)? as usize;
-    let mut compressed = vec![0u8; data_len];
-    r.read_exact(&mut compressed)?;
+    let mut pixels_bytes = vec![0u8; data_len];
+    r.read_exact(&mut pixels_bytes)?;
 
     let stored_crc = read_u32(&mut r)?;
-    let actual_crc = crc32fast::hash(&compressed);
+    let actual_crc = crc32fast::hash(&pixels_bytes);
     if stored_crc != actual_crc {
         bail!(
             "The CRC does not match: {:08x} != {:08x}",
@@ -289,17 +293,22 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
         );
     }
 
-    let mut dec = flate2::read::ZlibDecoder::new(&compressed[..]);
-    let mut filtered = Vec::new();
-    dec.read_to_end(&mut filtered)?;
-
-    let data = delta_decode(
-        &filtered,
-        &color_type,
-        &bit_depth,
-        width as usize,
-        height as usize,
-    );
+    let data = match compression {
+        0 => pixels_bytes,
+        1 => {
+            let mut dec = flate2::read::ZlibDecoder::new(&pixels_bytes[..]);
+            let mut filtered = Vec::new();
+            dec.read_to_end(&mut filtered)?;
+            delta_decode(
+                &filtered,
+                &color_type,
+                &bit_depth,
+                width as usize,
+                height as usize,
+            )
+        }
+        _ => bail!("Invalid compression algorithm {compression}"),
+    };
 
     let image = AlohaImage {
         width,
