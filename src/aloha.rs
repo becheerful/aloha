@@ -171,7 +171,7 @@ impl AlohaImage {
         let off = sample_index * bytes_per_sample as usize;
         match bytes_per_sample {
             1 => data[off] as u16,
-            2 => u16::from_be_bytes([data[off], data[off + 1]]),
+            2 => u16::from_le_bytes([data[off], data[off + 1]]),
             _ => unreachable!(),
         }
     }
@@ -181,7 +181,7 @@ impl AlohaImage {
         match bytes_per_sample {
             1 => data[off] = value as u8,
             2 => {
-                let b = value.to_be_bytes();
+                let b = value.to_le_bytes();
                 data[off] = b[0];
                 data[off + 1] = b[1];
             }
@@ -247,7 +247,7 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     }
 
     let version = read_u16(&mut r)?;
-    if version != VERSION {
+    if version > VERSION {
         bail!("Unsupported version: {version}");
     }
 
