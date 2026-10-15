@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use anyhow::{Ok, Result, bail};
 
 const MAGIC: &[u8; 6] = b"ALOHA1";
-const VERSION: u16 = 2;
+const VERSION: u16 = 0;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,9 +127,11 @@ impl From<&BitDepth> for png::BitDepth {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct Metadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 

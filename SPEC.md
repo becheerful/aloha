@@ -1,8 +1,8 @@
 # ALOHA Image Format Specification
 
-**Format version:** 2 \
+**Format version:** 0 \
 **Status:** Draft \
-**Last updated:** 2026-10-11
+**Last updated:** 2026-10-15
 
 ## 1. Overview
 
@@ -23,7 +23,7 @@ ALOHA is not intended for streaming or progressive decoding. It is designed for 
 
 ## 2. Conventions
 
-- **Byte order:** All multi-byte integers are **little-endian**.
+- **Byte order:** All multi-byte numbers are **little-endian**.
 - **Strings:** UTF-8 unless stated otherwise.
 - **Undefined behavior:** Any file that does not conform to this
   specification is invalid and MUST be rejected by conforming decoders.
@@ -95,7 +95,7 @@ If `color_type` is not `Indexed`, this section MUST be absent.
 
 ## 6. Metadata Section
 
-The metadata section is **always present** in version $\leq$ 2. It consists of:
+The metadata section is **always present** in version $\leq$ 0. It consists of:
 
 | Size | Field      | Description                     |
 |------|------------|---------------------------------|
@@ -207,4 +207,4 @@ before the data bytes.
 
 The final 4 bytes of the file are the CRC32 checksum of the **compressed (or raw) pixel data**,
 computed with the `crc32fast` crate. The header, palette, and metadata are **not** covered
-by this checksum in version $\leq$ 2.
+by this checksum in version $\leq$ 0.
