@@ -43,6 +43,19 @@ impl From<&png::ColorType> for ColorType {
     }
 }
 
+impl TryFrom<&jpeg_decoder::PixelFormat> for ColorType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &jpeg_decoder::PixelFormat) -> Result<Self, Self::Error> {
+        match value {
+            jpeg_decoder::PixelFormat::L8 => Ok(Self::Grayscale),
+            jpeg_decoder::PixelFormat::L16 => Ok(Self::Grayscale),
+            jpeg_decoder::PixelFormat::RGB24 => Ok(Self::Rgb),
+            jpeg_decoder::PixelFormat::CMYK32 => bail!("CMYK is unsupported"),
+        }
+    }
+}
+
 impl TryFrom<u8> for ColorType {
     type Error = anyhow::Error;
 
@@ -71,59 +84,38 @@ impl From<&ColorType> for png::ColorType {
     }
 }
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BitDepth {
-    Eight = 8,
-    Sixteen = 16,
+pub fn get_sample_mask(bit_depth: u8) -> u16 {
+    if bit_depth == 8 { 0xFF } else { 0xFFFF }
 }
 
-impl BitDepth {
-    pub fn sample_mask(&self) -> u16 {
-        if matches!(self, Self::Eight) {
-            0xFF
-        } else {
-            0xFFFF
-        }
-    }
+pub fn get_bytes_per_sample(bit_depth: u8) -> usize {
+    bit_depth as usize / 8
+}
 
-    pub fn bytes_per_sample(&self) -> usize {
-        *self as usize / 8
+pub fn from_png_bit_depth(value: &png::BitDepth) -> Result<u8> {
+    use png::BitDepth::*;
+    match value {
+        Eight => Ok(8),
+        Sixteen => Ok(16),
+        _ => bail!("Unsupported bit depth: {}", *value as u8),
     }
 }
 
-impl TryFrom<&png::BitDepth> for BitDepth {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &png::BitDepth) -> Result<Self, Self::Error> {
-        use png::BitDepth::*;
-        match value {
-            Eight => Ok(Self::Eight),
-            Sixteen => Ok(Self::Sixteen),
-            _ => bail!("Unsupported bit depth: {}", *value as u8),
-        }
+pub fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> u8 {
+    match value {
+        jpeg_decoder::PixelFormat::L8 => 8,
+        jpeg_decoder::PixelFormat::L16 => 16,
+        jpeg_decoder::PixelFormat::RGB24 => 8,
+        jpeg_decoder::PixelFormat::CMYK32 => 8,
     }
 }
 
-impl TryFrom<u8> for BitDepth {
-    type Error = anyhow::Error;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            8 => Ok(Self::Eight),
-            16 => Ok(Self::Sixteen),
-            _ => bail!("Invalid bit depth: {value}"),
-        }
-    }
-}
-
-impl From<&BitDepth> for png::BitDepth {
-    fn from(value: &BitDepth) -> Self {
-        use png::BitDepth::*;
-        match value {
-            BitDepth::Eight => Eight,
-            BitDepth::Sixteen => Sixteen,
-        }
+pub fn to_png_bit_depth(value: u8) -> Result<png::BitDepth> {
+    use png::BitDepth::*;
+    match value {
+        8 => Ok(Eight),
+        16 => Ok(Sixteen),
+        _ => bail!("Invalid bit depth {value}"),
     }
 }
 
@@ -140,7 +132,7 @@ pub struct AlohaImage {
     pub width: u32,
     pub height: u32,
     pub color_type: ColorType,
-    pub bit_depth: BitDepth,
+    pub bit_depth: u8,
     pub compression: u8,
     pub palette: Option<Vec<u8>>,
     pub metadata: Metadata,
@@ -149,7 +141,11 @@ pub struct AlohaImage {
 
 impl AlohaImage {
     pub fn validate(&self) -> Result<()> {
-        if self.color_type == ColorType::Indexed && self.bit_depth > BitDepth::Eight {
+        if self.color_type == ColorType::Indexed && self.palette.is_none() {
+            bail!("The pallete not found");
+        }
+
+        if self.color_type == ColorType::Indexed && self.bit_depth > 8 {
             bail!(
                 "Invalid bit depth for indexed color type: {}",
                 self.bit_depth as u8
@@ -170,7 +166,7 @@ impl AlohaImage {
     }
 
     pub fn bytes_per_pixel(&self) -> usize {
-        self.bit_depth.bytes_per_sample() * self.color_type.channels()
+        get_bytes_per_sample(self.bit_depth) * self.color_type.channels()
     }
 
     pub fn read_sample(bytes_per_sample: usize, data: &[u8], sample_index: usize) -> u16 {
@@ -206,11 +202,7 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     w.write_all(&image.width.to_le_bytes())?;
     w.write_all(&image.height.to_le_bytes())?;
 
-    w.write_all(&[
-        image.color_type as u8,
-        image.bit_depth as u8,
-        image.compression,
-    ])?;
+    w.write_all(&[image.color_type as u8, image.bit_depth, image.compression])?;
 
     if let Some(p) = &image.palette {
         w.write_all(&(p.len() as u16).to_le_bytes())?;
@@ -264,7 +256,7 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     r.read_exact(&mut one)?;
     let color_type = ColorType::try_from(one[0])?;
     r.read_exact(&mut one)?;
-    let bit_depth = BitDepth::try_from(one[0])?;
+    let bit_depth = one[0];
     r.read_exact(&mut one)?;
     let compression = one[0];
 
@@ -298,13 +290,13 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     let data = match compression {
         0 => pixels_bytes,
         1 => {
-            let mut dec = flate2::read::ZlibDecoder::new(&pixels_bytes[..]);
+            let mut dec = flate2::read::ZlibDecoder::new(pixels_bytes.as_slice());
             let mut filtered = Vec::new();
             dec.read_to_end(&mut filtered)?;
             delta_decode(
                 &filtered,
                 &color_type,
-                &bit_depth,
+                bit_depth,
                 width as usize,
                 height as usize,
             )
@@ -317,8 +309,8 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
         height,
         color_type,
         bit_depth,
-        palette,
         compression,
+        palette,
         metadata,
         data,
     };
@@ -332,8 +324,8 @@ fn delta_encode(image: &AlohaImage) -> Vec<u8> {
     }
 
     let ch = image.color_type.channels() as usize;
-    let mask = image.bit_depth.sample_mask();
-    let bytes_per_sample = image.bit_depth.bytes_per_sample();
+    let mask = get_sample_mask(image.bit_depth);
+    let bytes_per_sample = get_bytes_per_sample(image.bit_depth);
 
     let mut out = vec![0u8; image.data.len()];
 
@@ -356,7 +348,7 @@ fn delta_encode(image: &AlohaImage) -> Vec<u8> {
 fn delta_decode(
     data: &[u8],
     color_type: &ColorType,
-    bit_depth: &BitDepth,
+    bit_depth: u8,
     width: usize,
     height: usize,
 ) -> Vec<u8> {
@@ -365,7 +357,8 @@ fn delta_decode(
     }
 
     let channels = color_type.channels();
-    let bytes_per_sample = bit_depth.bytes_per_sample();
+    let bytes_per_sample = get_bytes_per_sample(bit_depth);
+    let sample_mask = get_sample_mask(bit_depth);
     let mut out = vec![0u8; data.len()];
 
     for y in 0..height as usize {
@@ -374,7 +367,7 @@ fn delta_decode(
             for c in 0..channels {
                 let s = (y * width as usize + x) * channels + c;
                 let d = AlohaImage::read_sample(bytes_per_sample, data, s);
-                let v = (prev[c].wrapping_add(d)) & bit_depth.sample_mask();
+                let v = (prev[c].wrapping_add(d)) & sample_mask;
                 AlohaImage::write_sample(bytes_per_sample, &mut out, s, v);
                 prev[c] = v;
             }

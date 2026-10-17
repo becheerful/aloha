@@ -111,7 +111,8 @@ The JSON object has the following fields:
 
 Additional keys MAY be present. Decoders MUST ignore unknown keys rather than fail.
 
-If metadata is empty, `meta_len` is `0` and the metadata bytes are absent.
+Fields with a value of None are not written. If metadata is empty, `meta_len` is `0`
+and the metadata bytes are absent.
 
 ## 7. Pixel Data
 
