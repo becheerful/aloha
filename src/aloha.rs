@@ -134,6 +134,7 @@ pub struct AlohaImage {
     pub color_type: ColorType,
     pub bit_depth: u8,
     pub compression: u8,
+    pub icc_profile: Option<Vec<u8>>,
     pub palette: Option<Vec<u8>>,
     pub metadata: Metadata,
     pub data: Vec<u8>,
@@ -141,11 +142,11 @@ pub struct AlohaImage {
 
 impl AlohaImage {
     pub fn validate(&self) -> Result<()> {
-        if self.color_type == ColorType::Indexed && self.palette.is_none() {
+        if self.color_type.is_indexed() && self.palette.is_none() {
             bail!("The pallete not found");
         }
 
-        if self.color_type == ColorType::Indexed && self.bit_depth > 8 {
+        if self.color_type.is_indexed() && self.bit_depth > 8 {
             bail!(
                 "Invalid bit depth for indexed color type: {}",
                 self.bit_depth as u8
@@ -204,6 +205,13 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
 
     w.write_all(&[image.color_type as u8, image.bit_depth, image.compression])?;
 
+    if let Some(icc) = &image.icc_profile {
+        w.write_all(&(icc.len() as u32).to_le_bytes())?;
+        w.write_all(icc)?;
+    } else {
+        w.write_all(&[0x00, 0x00, 0x00, 0x00])?;
+    }
+
     if let Some(p) = &image.palette {
         w.write_all(&(p.len() as u16).to_le_bytes())?;
         w.write_all(p)?;
@@ -260,8 +268,17 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     r.read_exact(&mut one)?;
     let compression = one[0];
 
+    let icc_profile_len = read_u32(&mut r)? as usize;
+    let icc_profile = if icc_profile_len == 0 {
+        None
+    } else {
+        let mut icc_bytes = vec![0u8; icc_profile_len];
+        r.read_exact(&mut icc_bytes)?;
+        Some(icc_bytes)
+    };
+
     let mut palette = None;
-    if matches!(color_type, ColorType::Indexed) {
+    if color_type.is_indexed() {
         let palette_len = read_u16(&mut r)? as usize;
         let mut palette_bytes = vec![0u8; palette_len];
         r.read_exact(&mut palette_bytes)?;
@@ -309,6 +326,7 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
         height,
         color_type,
         bit_depth,
+        icc_profile,
         compression,
         palette,
         metadata,
