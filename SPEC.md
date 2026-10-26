@@ -2,12 +2,13 @@
 
 **Format version:** 0 \
 **Status:** Draft \
-**Last updated:** 2026-10-15
+**Last updated:** 2026-10-25
 
 ## 1. Overview
 
-ALOHA is a lossless, archive-oriented raster image format. It combines horizontal delta coding
-with DEFLATE compression and stores arbitrary metadata alongside pixel data.
+ALOHA is a lossless, archive-oriented raster image format. It combines
+horizontal delta coding with DEFLATE compression and stores arbitrary metadata
+alongside pixel data.
 
 Design goals:
 
@@ -19,7 +20,8 @@ Design goals:
 - **Simple** — the format is intentionally minimal to keep decoders
   small and auditable.
 
-ALOHA is not intended for streaming or progressive decoding. It is designed for storage and interchange.
+ALOHA is not intended for streaming or progressive decoding.
+It is designed for storage and interchange.
 
 ## 2. Conventions
 
@@ -32,11 +34,12 @@ ALOHA is not intended for streaming or progressive decoding. It is designed for 
 
 An ALOHA file consists of the following sections, in order:
 
-- Header
-- Palette (optional)
-- Metadata (JSON)
-- Compressed pixel data
-- CRC32
+- [Header](#4-header)
+- [ICC profile](#5-icc-profile-section)
+- [Palette (optional)](#6-palette-section)
+- [Metadata (JSON)](#7-metadata-section)
+- [Compressed pixel data](#8-pixel-data)
+- [CRC32](#9-crc32)
 
 All sections are contiguous. No padding is inserted.
 
@@ -52,10 +55,13 @@ All sections are contiguous. No padding is inserted.
 | 17     | 1    | `bit_depth`   | Bits per channel: `8` or `16`.                   |
 | 18     | 1    | `compression` | See [4.2](#42-compression-algorithms).           |
 
-Immediately after the header, if `color_type` is `Indexed`, the palette section follows.
-Then the metadata section, then the compressed pixel data, then the CRC32.
+Immediately after the header, the ICC profile section follows. If `color_type` is `Indexed`,
+then the palette section follows. Then the metadata section, then the compressed pixel data,
+then the CRC32.
 
 ### 4.1 Color types
+
+Color type is an 8-bit unsigned integer that represents the image's color model.
 
 | Value | Name           | Channels | Description                                |
 |-------|----------------|----------|--------------------------------------------|
@@ -69,6 +75,9 @@ Values `5`—`255` are invalid and MUST be rejected.
 
 ### 4.2 Compression algorithms
 
+Compression algorithm is an 8-bit unsigned integer that represents the pixel data
+compression algotithm being used.
+
 | Value | Algorithm    | Description                                         |
 |-------|--------------|-----------------------------------------------------|
 | 0     | None         | No compression.                                     |
@@ -76,7 +85,16 @@ Values `5`—`255` are invalid and MUST be rejected.
 
 Values `2`—`255` are invalid and MUST be rejected.
 
-## 5. Palette Section
+## 5. ICC Profile Section
+
+The ICC profile section consists of:
+
+| Size | Field         | Description                              |
+|------|---------------|------------------------------------------|
+| 4    | `iccp_len`    | Length of ICC profile, `u32`.            |
+| *    | `icc_profile` | `iccp_len` bytes of ICC profile data.    |
+
+## 6. Palette Section
 
 Required when `color_type` is `Indexed`. The palette section consists of:
 
@@ -93,9 +111,9 @@ of the PNG palette.
 
 If `color_type` is not `Indexed`, this section MUST be absent.
 
-## 6. Metadata Section
+## 7. Metadata Section
 
-The metadata section is **always present** in version $\leq$ 0. It consists of:
+The metadata section consists of:
 
 | Size | Field      | Description                     |
 |------|------------|---------------------------------|
@@ -111,12 +129,12 @@ The JSON object has the following fields:
 
 Additional keys MAY be present. Decoders MUST ignore unknown keys rather than fail.
 
-Fields with a value of None are not written. If metadata is empty, `meta_len` is `0`
+Fields with a value of `None` are not written. If metadata is empty, `meta_len` is `0`
 and the metadata bytes are absent.
 
-## 7. Pixel Data
+## 8. Pixel Data
 
-### 7.1 Representation
+### 8.1 Representation
 
 Samples are stored in **pixel-interleaved** order: for a pixel at `(x, y)` and channel `c`,
 the sample index is
@@ -125,19 +143,19 @@ the sample index is
 s = (y * width + x) * channels + c
 ```
 
-where `channels` is the channel count for the color type (see [4.1](#41-color-types)). Rows are
-laid out top to bottom, pixels within a row left to right, channels within a pixel in the order
-defined by the color type (e.g. R, G, B, A).
+where `channels` is the channel count for the color type (see [4.1](#41-color-types)).
+Rows are laid out top to bottom, pixels within a row left to right, channels within a
+pixel in the order defined by the color type (e.g. R, G, B, A).
 
 Each sample is stored as an unsigned integer of `bit_depth` bits (`8` or `16`):
 
 - `bit_depth == 8`: one byte per sample.
 - `bit_depth == 16`: two bytes per sample, **little-endian**.
 
-A sample's value is in the range `[0, 2^bit_depth - 1]`; the mask `2^bit_depth - 1` is reffered
-to below as `sample_mask`.
+A sample's value is in the range `[0, 2^bit_depth - 1]`; the mask `2^bit_depth - 1` is
+reffered to below as `sample_mask`.
 
-### 7.2 Delta coding
+### 8.2 Delta coding
 
 Delta coding is applied when `compression = 1` **and** `color_type` is not `Indexed`.
 For `Indexed` images the pixel buffer is stored unchanged, with no delta coding,
@@ -177,7 +195,7 @@ for y in 0..height:
         for c in 0..channels:
             d = read_sample(data, (y * width + x) * channels + c)
             v = (prev[c] + d) mod 2^bit_depth
-            write_sample(out, (y * width + x) * channels + c), v
+            write_sample(out, (y * width + x) * channels + c, v)
             prev[c] = v
 ```
 
@@ -191,7 +209,7 @@ special case in the algorithm — it falls out of the per-row reset.
 If `compression == 0`, or if `color_type` is `Indexed`, no delta coding is applied and
 `out` equals `data` for the pixel section.
 
-### 7.3 Compression
+### 8.3 Compression
 
 When `compression == 1`, the (possibly delta-coded) pixel buffer is compressed with DEFLATE
 as produced by zlib, i.e. the same algorthm exposed by `flate2`'s `ZlibEncoder` / `ZlibDecoder`
@@ -201,10 +219,7 @@ No preset dictionary is used. The zlib header MUST be present.
 
 When `compression == 0`, the pixel data is stored raw.
 
-The compressed (or raw) stream length is stored as a `u64` little-endian value immediately
-before the data bytes.
-
-## 8. CRC32
+## 9. CRC32
 
 The final 4 bytes of the file are the CRC32 checksum of the **compressed (or raw) pixel data**,
 computed with the `crc32fast` crate. The header, palette, and metadata are **not** covered
