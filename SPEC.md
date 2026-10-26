@@ -2,7 +2,7 @@
 
 **Format version:** 0 \
 **Status:** Draft \
-**Last updated:** 2026-10-25
+**Last updated:** 2026-10-27
 
 ## 1. Overview
 
@@ -221,6 +221,5 @@ When `compression == 0`, the pixel data is stored raw.
 
 ## 9. CRC32
 
-The final 4 bytes of the file are the CRC32 checksum of the **compressed (or raw) pixel data**,
-computed with the `crc32fast` crate. The header, palette, and metadata are **not** covered
-by this checksum in version $\leq$ 0.
+The final 4 bytes of the file are the CRC32 checksum of all the data in the file (without the
+checksum itself, of course), computed with the `crc32fast` crate.

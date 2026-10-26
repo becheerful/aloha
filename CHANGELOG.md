@@ -7,3 +7,4 @@
 | 0.1.2         | 0              | 2026-10-13 | Fixed the issue of ignoring a compression algorithm when reading ALOHA file. |
 | 0.1.3         | 0              | 2026-10-15 | Now, fields in the metadata with a value of None are not serialized.         |
 | 0.2.0         | 0              | 2026-10-25 | Added support for ICC profiles.                                              |
+| 0.3.0         | 0              | 2026-10-27 | Now CRC32 covers the entire file.                                            |

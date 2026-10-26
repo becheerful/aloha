@@ -195,32 +195,37 @@ impl AlohaImage {
 
 pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     let file = std::fs::File::create(path)?;
-    let mut w = std::io::BufWriter::new(file);
+    let mut buffer: Vec<u8> = Vec::new();
 
-    w.write_all(MAGIC)?;
-    w.write_all(&VERSION.to_le_bytes())?;
+    // Writing the header
+    buffer.extend(MAGIC);
+    buffer.extend(VERSION.to_le_bytes());
 
-    w.write_all(&image.width.to_le_bytes())?;
-    w.write_all(&image.height.to_le_bytes())?;
+    buffer.extend(image.width.to_le_bytes());
+    buffer.extend(image.height.to_le_bytes());
 
-    w.write_all(&[image.color_type as u8, image.bit_depth, image.compression])?;
+    buffer.extend([image.color_type as u8, image.bit_depth, image.compression]);
 
+    // Writing the ICC profile section
     if let Some(icc) = &image.icc_profile {
-        w.write_all(&(icc.len() as u32).to_le_bytes())?;
-        w.write_all(icc)?;
+        buffer.extend((icc.len() as u32).to_le_bytes());
+        buffer.extend(icc);
     } else {
-        w.write_all(&[0x00, 0x00, 0x00, 0x00])?;
+        buffer.extend(0u32.to_le_bytes());
     }
 
+    // Writing the palette section
     if let Some(p) = &image.palette {
-        w.write_all(&(p.len() as u16).to_le_bytes())?;
-        w.write_all(p)?;
+        buffer.extend((p.len() as u16).to_le_bytes());
+        buffer.extend(p);
     }
 
+    // Writing the metadata section
     let meta_json = serde_json::to_vec(&image.metadata)?;
-    w.write_all(&(meta_json.len() as u32).to_le_bytes())?;
-    w.write_all(&meta_json)?;
+    buffer.extend((meta_json.len() as u32).to_le_bytes());
+    buffer.extend(meta_json);
 
+    // Writing the compressed pixel data section
     let compressed = match image.compression {
         0 => Ok(image.data.clone()),
         1 => {
@@ -233,76 +238,96 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
         _ => bail!("Unsupported compression algorithm: {}", image.compression),
     }?;
 
-    w.write_all(&(compressed.len() as u64).to_le_bytes())?;
-    w.write_all(&compressed)?;
+    buffer.extend((compressed.len() as u64).to_le_bytes());
+    buffer.extend(compressed);
 
-    w.write_all(&crc32fast::hash(&compressed).to_le_bytes())?;
+    // Writing the CRC32 section
+    let checksum = crc32fast::hash(&buffer);
+    buffer.extend(checksum.to_le_bytes());
 
+    // Writing the buffer to a file
+    let mut w = std::io::BufWriter::new(file);
+    w.write_all(&buffer)?;
     w.flush()?;
+
     Ok(())
 }
 
 pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     let file = std::fs::File::open(path)?;
+    let mut buffer: Vec<u8> = Vec::new();
     let mut r = std::io::BufReader::new(file);
 
+    // Reading the header
     let mut magic = [0u8; 6];
     r.read_exact(&mut magic)?;
     if &magic != MAGIC {
         bail!("Not an *.aloha file");
     }
+    buffer.extend(magic);
 
-    let version = read_u16(&mut r)?;
+    let version = read_u16(&mut r, &mut buffer)?;
     if version > VERSION {
         bail!("Unsupported version: {version}");
     }
 
-    let width = read_u32(&mut r)?;
-    let height = read_u32(&mut r)?;
+    let width = read_u32(&mut r, &mut buffer)?;
+    let height = read_u32(&mut r, &mut buffer)?;
 
     let mut one = [0u8; 1];
+
     r.read_exact(&mut one)?;
-    let color_type = ColorType::try_from(one[0])?;
+    let color_type = one[0];
+    buffer.push(color_type);
+    let color_type = ColorType::try_from(color_type)?;
+
     r.read_exact(&mut one)?;
     let bit_depth = one[0];
+    buffer.push(bit_depth);
+
     r.read_exact(&mut one)?;
     let compression = one[0];
+    buffer.push(compression);
 
-    let icc_profile_len = read_u32(&mut r)? as usize;
+    // Reading the ICC profile section
+    let icc_profile_len = read_u32(&mut r, &mut buffer)?;
+
     let icc_profile = if icc_profile_len == 0 {
         None
     } else {
-        let mut icc_bytes = vec![0u8; icc_profile_len];
+        let mut icc_bytes = vec![0u8; icc_profile_len as usize];
         r.read_exact(&mut icc_bytes)?;
+        buffer.extend(&icc_bytes);
         Some(icc_bytes)
     };
 
+    // Reading the palette section
     let mut palette = None;
     if color_type.is_indexed() {
-        let palette_len = read_u16(&mut r)? as usize;
-        let mut palette_bytes = vec![0u8; palette_len];
+        let palette_len = read_u16(&mut r, &mut buffer)?;
+
+        let mut palette_bytes = vec![0u8; palette_len as usize];
         r.read_exact(&mut palette_bytes)?;
+        buffer.extend(&palette_bytes);
+
         palette = Some(palette_bytes);
     }
 
-    let meta_len = read_u32(&mut r)? as usize;
-    let mut meta_bytes = vec![0u8; meta_len];
+    // Reading the metadata section
+    let meta_len = read_u32(&mut r, &mut buffer)?;
+
+    let mut meta_bytes = vec![0u8; meta_len as usize];
     r.read_exact(&mut meta_bytes)?;
+    buffer.extend_from_slice(&meta_bytes);
+
     let metadata = serde_json::from_slice::<Metadata>(&meta_bytes)?;
 
-    let data_len = read_u64(&mut r)? as usize;
-    let mut pixels_bytes = vec![0u8; data_len];
-    r.read_exact(&mut pixels_bytes)?;
+    // Reading the compressed data section
+    let data_len = read_u64(&mut r, &mut buffer)?;
 
-    let stored_crc = read_u32(&mut r)?;
-    let actual_crc = crc32fast::hash(&pixels_bytes);
-    if stored_crc != actual_crc {
-        bail!(
-            "The CRC does not match: {:08x} != {:08x}",
-            stored_crc,
-            actual_crc
-        );
-    }
+    let mut pixels_bytes = vec![0u8; data_len as usize];
+    r.read_exact(&mut pixels_bytes)?;
+    buffer.extend(&pixels_bytes);
 
     let data = match compression {
         0 => pixels_bytes,
@@ -320,6 +345,21 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
         }
         _ => bail!("Invalid compression algorithm {compression}"),
     };
+
+    // Reading the CRC32 section
+    let mut crc32_bytes = [0u8; 4];
+    r.read_exact(&mut crc32_bytes)?;
+
+    let stored_crc = u32::from_le_bytes(crc32_bytes);
+    let actual_crc = crc32fast::hash(&buffer);
+
+    if stored_crc != actual_crc {
+        bail!(
+            "The CRC does not match: {:08x} != {:08x}",
+            stored_crc,
+            actual_crc
+        );
+    }
 
     let image = AlohaImage {
         width,
@@ -395,20 +435,23 @@ fn delta_decode(
     out
 }
 
-fn read_u16(r: &mut impl Read) -> Result<u16> {
+fn read_u16(r: &mut impl Read, buf: &mut Vec<u8>) -> Result<u16> {
     let mut b = [0u8; 2];
     r.read_exact(&mut b)?;
+    buf.extend(b);
     Ok(u16::from_le_bytes(b))
 }
 
-fn read_u32(r: &mut impl Read) -> Result<u32> {
+fn read_u32(r: &mut impl Read, buf: &mut Vec<u8>) -> Result<u32> {
     let mut b = [0u8; 4];
     r.read_exact(&mut b)?;
+    buf.extend(b);
     Ok(u32::from_le_bytes(b))
 }
 
-fn read_u64(r: &mut impl Read) -> Result<u64> {
+fn read_u64(r: &mut impl Read, buf: &mut Vec<u8>) -> Result<u64> {
     let mut b = [0u8; 8];
     r.read_exact(&mut b)?;
+    buf.extend(b);
     Ok(u64::from_le_bytes(b))
 }
