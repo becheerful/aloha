@@ -39,14 +39,12 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         data: buf[..frame.buffer_size()].to_vec(),
     };
 
-    image.validate()?;
     crate::aloha::write_aloha(aloha_path, &image)?;
     Ok(())
 }
 
 pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
     let image = read_aloha(aloha_path)?;
-    image.validate()?;
 
     let mut info = png::Info::with_size(image.width, image.height);
 
@@ -99,14 +97,12 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
         data,
     };
 
-    image.validate()?;
     crate::aloha::write_aloha(aloha_path, &image)?;
     Ok(())
 }
 
 pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
     let image = read_aloha(aloha_path)?;
-    image.validate()?;
 
     let mut enc = jpeg_encoder::Encoder::new_file(jpeg_path, 100)?;
     if let Some(icc) = image.icc_profile {

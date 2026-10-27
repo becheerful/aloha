@@ -194,6 +194,8 @@ impl AlohaImage {
 }
 
 pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
+    image.validate()?;
+
     let file = std::fs::File::create(path)?;
     let mut buffer: Vec<u8> = Vec::new();
 
@@ -215,7 +217,9 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     }
 
     // Writing the palette section
-    if let Some(p) = &image.palette {
+    if image.color_type.is_indexed()
+        && let Some(p) = &image.palette
+    {
         buffer.extend((p.len() as u16).to_le_bytes());
         buffer.extend(p);
     }
@@ -373,6 +377,7 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
         data,
     };
 
+    image.validate()?;
     Ok(image)
 }
 
