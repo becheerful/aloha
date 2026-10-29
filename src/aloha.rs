@@ -47,12 +47,13 @@ impl TryFrom<&jpeg_decoder::PixelFormat> for ColorType {
     type Error = anyhow::Error;
 
     fn try_from(value: &jpeg_decoder::PixelFormat) -> Result<Self, Self::Error> {
-        match value {
-            jpeg_decoder::PixelFormat::L8 => Ok(Self::Grayscale),
-            jpeg_decoder::PixelFormat::L16 => Ok(Self::Grayscale),
-            jpeg_decoder::PixelFormat::RGB24 => Ok(Self::Rgb),
-            jpeg_decoder::PixelFormat::CMYK32 => bail!("CMYK is unsupported"),
-        }
+        use jpeg_decoder::PixelFormat::*;
+        Ok(match value {
+            L8 => Self::Grayscale,
+            L16 => Self::Grayscale,
+            RGB24 => Self::Rgb,
+            CMYK32 => bail!("CMYK is unsupported"),
+        })
     }
 }
 
@@ -60,14 +61,14 @@ impl TryFrom<u8> for ColorType {
     type Error = anyhow::Error;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Grayscale),
-            1 => Ok(Self::GrayscaleAlpha),
-            2 => Ok(Self::Rgb),
-            3 => Ok(Self::Rgba),
-            4 => Ok(Self::Indexed),
+        Ok(match value {
+            0 => Self::Grayscale,
+            1 => Self::GrayscaleAlpha,
+            2 => Self::Rgb,
+            3 => Self::Rgba,
+            4 => Self::Indexed,
             _ => bail!("Invalid color type: {value}"),
-        }
+        })
     }
 }
 
@@ -88,35 +89,32 @@ pub fn get_sample_mask(bit_depth: u8) -> u16 {
     if bit_depth == 8 { 0xFF } else { 0xFFFF }
 }
 
-pub fn get_bytes_per_sample(bit_depth: u8) -> usize {
-    bit_depth as usize / 8
-}
-
 pub fn from_png_bit_depth(value: &png::BitDepth) -> Result<u8> {
     use png::BitDepth::*;
-    match value {
-        Eight => Ok(8),
-        Sixteen => Ok(16),
+    Ok(match value {
+        Eight => 8,
+        Sixteen => 16,
         _ => bail!("Unsupported bit depth: {}", *value as u8),
-    }
+    })
 }
 
-pub fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> u8 {
-    match value {
-        jpeg_decoder::PixelFormat::L8 => 8,
-        jpeg_decoder::PixelFormat::L16 => 16,
-        jpeg_decoder::PixelFormat::RGB24 => 8,
-        jpeg_decoder::PixelFormat::CMYK32 => 8,
-    }
+pub fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
+    use jpeg_decoder::PixelFormat::*;
+    Ok(match value {
+        L8 => 8,
+        L16 => 16,
+        RGB24 => 8,
+        CMYK32 => bail!("CMYK is unsupported"),
+    })
 }
 
 pub fn to_png_bit_depth(value: u8) -> Result<png::BitDepth> {
     use png::BitDepth::*;
-    match value {
-        8 => Ok(Eight),
-        16 => Ok(Sixteen),
+    Ok(match value {
+        8 => Eight,
+        16 => Sixteen,
         _ => bail!("Invalid bit depth {value}"),
-    }
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -134,10 +132,13 @@ pub struct AlohaImage {
     pub color_type: ColorType,
     pub bit_depth: u8,
     pub compression: u8,
+    pub has_gain_map: bool,
     pub icc_profile: Option<Vec<u8>>,
     pub palette: Option<Vec<u8>>,
     pub metadata: Metadata,
     pub data: Vec<u8>,
+    pub gain_map_metadata: Option<ultrahdr_core::GainMapMetadata>,
+    pub gain_map: Option<ultrahdr_core::GainMap>,
 }
 
 impl AlohaImage {
@@ -163,11 +164,15 @@ impl AlohaImage {
             bail!("The data size {actual_size} does not match the expected {expected_size}");
         }
 
+        if let Some(gain_map) = &self.gain_map {
+            gain_map.validate()?;
+        }
+
         Ok(())
     }
 
     pub fn bytes_per_pixel(&self) -> usize {
-        get_bytes_per_sample(self.bit_depth) * self.color_type.channels()
+        (self.bit_depth as usize / 8) * self.color_type.channels()
     }
 
     pub fn read_sample(bytes_per_sample: usize, data: &[u8], sample_index: usize) -> u16 {
@@ -206,7 +211,10 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     buffer.extend(image.width.to_le_bytes());
     buffer.extend(image.height.to_le_bytes());
 
-    buffer.extend([image.color_type as u8, image.bit_depth, image.compression]);
+    buffer.push(image.color_type as u8);
+    buffer.push(image.bit_depth);
+    buffer.push(image.compression);
+    buffer.push(image.has_gain_map as u8);
 
     // Writing the ICC profile section
     if let Some(icc) = &image.icc_profile {
@@ -217,9 +225,11 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     }
 
     // Writing the palette section
-    if image.color_type.is_indexed()
-        && let Some(p) = &image.palette
-    {
+    if image.color_type.is_indexed() {
+        let Some(p) = &image.palette else {
+            bail!("Image's color type is Indexed, but a palette is missing");
+        };
+
         buffer.extend((p.len() as u16).to_le_bytes());
         buffer.extend(p);
     }
@@ -233,7 +243,18 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     let compressed = match image.compression {
         0 => Ok(image.data.clone()),
         1 => {
-            let filtered = delta_encode(&image);
+            let filtered = if image.color_type.is_indexed() {
+                delta_encode(
+                    &image.data,
+                    image.width as usize,
+                    image.height as usize,
+                    &image.color_type,
+                    image.bit_depth,
+                )
+            } else {
+                image.data.clone()
+            };
+
             let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
             enc.write_all(&filtered)?;
             let compressed = enc.finish()?;
@@ -244,6 +265,51 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
 
     buffer.extend((compressed.len() as u64).to_le_bytes());
     buffer.extend(compressed);
+
+    if image.has_gain_map {
+        // Writing the gain map metadata section
+        let Some(gain_map_params) = &image.gain_map_metadata else {
+            bail!("Image must have a gain map's metadata but it's absent");
+        };
+
+        for i in 0..3 {
+            let channel = gain_map_params.channels[i];
+            buffer.extend(channel.min.to_le_bytes());
+            buffer.extend(channel.max.to_le_bytes());
+            buffer.extend(channel.gamma.to_le_bytes());
+            buffer.extend(channel.base_offset.to_le_bytes());
+            buffer.extend(channel.alternate_offset.to_le_bytes());
+        }
+
+        buffer.extend(gain_map_params.base_hdr_headroom.to_le_bytes());
+        buffer.extend(gain_map_params.alternate_hdr_headroom.to_le_bytes());
+        buffer.push(gain_map_params.use_base_color_space as u8);
+        buffer.push(gain_map_params.backward_direction as u8);
+
+        // Writing the gain map section
+        let Some(gain_map) = &image.gain_map else {
+            bail!("Image must have a gain map but it's absent");
+        };
+
+        let filtered = delta_encode(
+            &gain_map.data,
+            gain_map.width as usize,
+            gain_map.height as usize,
+            &ColorType::Grayscale, // grayscale, since a gain map stores only coefficients
+            8,                     // bit depth for gain map is always 8
+        );
+
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&filtered)?;
+        let compressed = enc.finish()?;
+
+        buffer.extend(gain_map.width.to_le_bytes());
+        buffer.extend(gain_map.height.to_le_bytes());
+        buffer.push(gain_map.channels);
+
+        buffer.extend((compressed.len() as u64).to_le_bytes());
+        buffer.extend(compressed);
+    }
 
     // Writing the CRC32 section
     let checksum = crc32fast::hash(&buffer);
@@ -293,9 +359,12 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     let compression = one[0];
     buffer.push(compression);
 
+    r.read_exact(&mut one)?;
+    buffer.extend(&one);
+    let has_gain_map = one[0] != 0;
+
     // Reading the ICC profile section
     let icc_profile_len = read_u32(&mut r, &mut buffer)?;
-
     let icc_profile = if icc_profile_len == 0 {
         None
     } else {
@@ -306,16 +375,17 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     };
 
     // Reading the palette section
-    let mut palette = None;
-    if color_type.is_indexed() {
+    let palette = if color_type.is_indexed() {
         let palette_len = read_u16(&mut r, &mut buffer)?;
 
         let mut palette_bytes = vec![0u8; palette_len as usize];
         r.read_exact(&mut palette_bytes)?;
         buffer.extend(&palette_bytes);
 
-        palette = Some(palette_bytes);
-    }
+        Some(palette_bytes)
+    } else {
+        None
+    };
 
     // Reading the metadata section
     let meta_len = read_u32(&mut r, &mut buffer)?;
@@ -341,14 +411,90 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
             dec.read_to_end(&mut filtered)?;
             delta_decode(
                 &filtered,
-                &color_type,
-                bit_depth,
                 width as usize,
                 height as usize,
+                &color_type,
+                bit_depth,
             )
         }
         _ => bail!("Invalid compression algorithm {compression}"),
     };
+
+    // Reading the gain map section
+    let mut gain_map_metadata = None;
+    let mut gain_map = None;
+
+    if has_gain_map {
+        let mut channels = Vec::new();
+        for _ in 0..3 {
+            let min = read_f64(&mut r, &mut buffer)?;
+            let max = read_f64(&mut r, &mut buffer)?;
+            let gamma = read_f64(&mut r, &mut buffer)?;
+            let base_offset = read_f64(&mut r, &mut buffer)?;
+            let alternate_offset = read_f64(&mut r, &mut buffer)?;
+
+            channels.push(zencodec::GainMapChannel {
+                min,
+                max,
+                gamma,
+                base_offset,
+                alternate_offset,
+            });
+        }
+
+        let base_hdr_headroom = read_f64(&mut r, &mut buffer)?;
+        let alternate_hdr_headroom = read_f64(&mut r, &mut buffer)?;
+
+        let mut b = [0u8];
+
+        r.read_exact(&mut b)?;
+        buffer.extend(&b);
+        let use_base_color_space = b[0] != 0;
+
+        r.read_exact(&mut b)?;
+        buffer.extend(&b);
+        let backward_direction = b[0] != 0;
+
+        // this mess is due to the fact that the `GainMapMetadata` is non-exhaustive
+        let mut gmmd = ultrahdr_core::GainMapMetadata::default();
+        gmmd.channels = channels[..3].try_into()?;
+        gmmd.base_hdr_headroom = base_hdr_headroom;
+        gmmd.alternate_hdr_headroom = alternate_hdr_headroom;
+        gmmd.use_base_color_space = use_base_color_space;
+        gmmd.backward_direction = backward_direction;
+        gain_map_metadata = Some(gmmd);
+
+        let width = read_u32(&mut r, &mut buffer)?;
+        let height = read_u32(&mut r, &mut buffer)?;
+
+        r.read_exact(&mut b)?;
+        let channels = b[0];
+        buffer.push(channels);
+
+        let gain_map_len = read_u64(&mut r, &mut buffer)?;
+        let mut gain_map_bytes = vec![0u8; gain_map_len as usize];
+        r.read_exact(&mut gain_map_bytes)?;
+        buffer.extend(&gain_map_bytes);
+
+        let mut dec = flate2::read::ZlibDecoder::new(gain_map_bytes.as_slice());
+        let mut filtered = Vec::new();
+        dec.read_to_end(&mut filtered)?;
+
+        let data = delta_decode(
+            &data,
+            width as usize,
+            height as usize,
+            &color_type,
+            bit_depth,
+        );
+
+        gain_map = Some(ultrahdr_core::GainMap {
+            width,
+            height,
+            channels,
+            data,
+        });
+    }
 
     // Reading the CRC32 section
     let mut crc32_bytes = [0u8; 4];
@@ -372,32 +518,40 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
         bit_depth,
         icc_profile,
         compression,
+        has_gain_map,
         palette,
         metadata,
         data,
+        gain_map_metadata,
+        gain_map,
     };
 
     image.validate()?;
     Ok(image)
 }
 
-fn delta_encode(image: &AlohaImage) -> Vec<u8> {
-    if image.color_type.is_indexed() {
-        return image.data.clone();
+fn delta_encode(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    color_type: &ColorType,
+    bit_depth: u8,
+) -> Vec<u8> {
+    if color_type.is_indexed() {
+        return data.to_vec();
     }
 
-    let ch = image.color_type.channels() as usize;
-    let mask = get_sample_mask(image.bit_depth);
-    let bytes_per_sample = get_bytes_per_sample(image.bit_depth);
+    let channels = color_type.channels();
+    let bytes_per_sample = bit_depth as usize / 8;
+    let mask = get_sample_mask(bit_depth);
+    let mut out = vec![0u8; data.len()];
 
-    let mut out = vec![0u8; image.data.len()];
-
-    for y in 0..image.height as usize {
-        let mut prev = vec![0u16; ch];
-        for x in 0..image.width as usize {
-            for c in 0..ch {
-                let s = (y * image.width as usize + x) * ch + c;
-                let v = AlohaImage::read_sample(bytes_per_sample, &image.data, s);
+    for y in 0..height as usize {
+        let mut prev = vec![0u16; channels];
+        for x in 0..width as usize {
+            for c in 0..channels {
+                let s = (y * width as usize + x) * channels + c;
+                let v = AlohaImage::read_sample(bytes_per_sample, data, s);
                 let d = v.wrapping_sub(prev[c]) & mask;
                 AlohaImage::write_sample(bytes_per_sample, &mut out, s, d);
                 prev[c] = v;
@@ -410,18 +564,18 @@ fn delta_encode(image: &AlohaImage) -> Vec<u8> {
 
 fn delta_decode(
     data: &[u8],
-    color_type: &ColorType,
-    bit_depth: u8,
     width: usize,
     height: usize,
+    color_type: &ColorType,
+    bit_depth: u8,
 ) -> Vec<u8> {
     if color_type.is_indexed() {
         return data.to_vec();
     }
 
     let channels = color_type.channels();
-    let bytes_per_sample = get_bytes_per_sample(bit_depth);
-    let sample_mask = get_sample_mask(bit_depth);
+    let bytes_per_sample = bit_depth as usize / 8;
+    let mask = get_sample_mask(bit_depth);
     let mut out = vec![0u8; data.len()];
 
     for y in 0..height as usize {
@@ -430,7 +584,7 @@ fn delta_decode(
             for c in 0..channels {
                 let s = (y * width as usize + x) * channels + c;
                 let d = AlohaImage::read_sample(bytes_per_sample, data, s);
-                let v = (prev[c].wrapping_add(d)) & sample_mask;
+                let v = (prev[c].wrapping_add(d)) & mask;
                 AlohaImage::write_sample(bytes_per_sample, &mut out, s, v);
                 prev[c] = v;
             }
@@ -459,4 +613,11 @@ fn read_u64(r: &mut impl Read, buf: &mut Vec<u8>) -> Result<u64> {
     r.read_exact(&mut b)?;
     buf.extend(b);
     Ok(u64::from_le_bytes(b))
+}
+
+fn read_f64(r: &mut impl Read, buf: &mut Vec<u8>) -> Result<f64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    buf.extend(b);
+    Ok(f64::from_le_bytes(b))
 }
