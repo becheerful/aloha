@@ -1,27 +1,17 @@
 use std::path::Path;
 
-use anyhow::{Context, Ok, Result, bail};
-use ultrahdr_core::{PixelFormat, TransferFunction};
+use anyhow::{Context, Result, bail};
+use ultrahdr_rs::ColorGamut;
 
 use crate::aloha::{AlohaImage, ColorType, Metadata, read_aloha, write_aloha};
 
-fn png_info_to_uhdr_pf(
-    color_type: &png::ColorType,
-    bit_depth: &png::BitDepth,
-) -> Result<PixelFormat> {
-    use PixelFormat::*;
-    use png::{BitDepth::*, ColorType::*};
-    Ok(match (color_type, bit_depth) {
-        (Rgb, Eight) => Rgb8,
-        (Rgba, Eight) => Rgb8,
-        (Rgb, Sixteen) => Rgb16,
-        (Rgba, Sixteen) => Rgba16,
-        _ => bail!("Unsupported image format"),
+pub fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
+    use jpeg_decoder::PixelFormat::*;
+    Ok(match value {
+        L8 | RGB24 => 8,
+        L16 => 16,
+        other => bail!("Unsupported pixel format: {other:?}"),
     })
-}
-
-fn is_hdr(tf: &TransferFunction) -> bool {
-    matches!(tf, TransferFunction::Pq | TransferFunction::Hlg)
 }
 
 pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
@@ -39,50 +29,84 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         )
     };
 
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let frame = reader.next_frame(&mut buf)?;
-    let mut data = buf[..frame.buffer_size()].to_vec();
+    let mut data = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut data)?;
+    data.truncate(info.buffer_size());
 
     let mut has_gain_map = false;
+    if let Some(cicp) = cicp {
+        has_gain_map = cicp.transfer_function == 16 || cicp.transfer_function == 18;
+    }
+
     let mut gain_map_metadata = None;
     let mut gain_map = None;
 
-    if let Some(cicp) = cicp {
-        let format = png_info_to_uhdr_pf(&color_type, &bit_depth)?;
-        let primaries = ultrahdr_core::ColorPrimaries::from_cicp(cicp.color_primaries)
-            .context("Unknown color primaries")?;
-        let transfer = TransferFunction::from_cicp(cicp.transfer_function)
-            .context("Unknown transfer function")?;
-        has_gain_map = is_hdr(&transfer);
+    use png::BitDepth::*;
+    if has_gain_map {
+        let Some(cicp) = cicp else {
+            bail!("Image must have cICP chunk but it's absent");
+        };
 
-        if has_gain_map {
-            let hdr = ultrahdr_core::new_pixel_buffer(
-                width / 4,
-                height / 4,
+        use png::ColorType::*;
+        use ultrahdr_core::PixelFormat::*;
+        let format = match (color_type, bit_depth) {
+            (Rgb, Eight) => Rgb8,
+            (Rgba, Eight) => Rgba8,
+            (ct, bd) => bail!("Unsupported pixel format: {ct:?}, {}-bit", bd as u8),
+        };
+
+        use ultrahdr_core::ColorTransfer::*;
+        let hdr_image = ultrahdr_core::RawImage {
+            width,
+            height,
+            format,
+            gamut: ColorGamut::default(),
+            transfer: match cicp.transfer_function {
+                1 | 6 | 14 | 15 => Srgb,
+                16 => Pq,
+                18 => Hlg,
+                other => bail!("Unknown transfer function: {other}"),
+            },
+            data,
+            stride: 0,
+        };
+
+        let sdr_data =
+            ultrahdr_core::color::tonemap_image_to_srgb8(&hdr_image, ColorGamut::default())?;
+
+        data = sdr_data.clone();
+
+        (gain_map, gain_map_metadata) = Some(ultrahdr_core::gainmap::compute_gainmap(
+            &hdr_image,
+            &ultrahdr_rs::RawImage {
+                width,
+                height,
                 format,
-                primaries,
-                transfer,
-            )?;
-            let sdr = ultrahdr_core::new_pixel_buffer(width, height, format, primaries, transfer)?;
-
-            let config = ultrahdr_core::GainMapConfig::default();
-            (gain_map, gain_map_metadata) = Some(ultrahdr_core::gainmap::compute_gainmap(
-                &hdr,
-                &sdr,
-                &config,
-                ultrahdr_core::Unstoppable,
-            )?)
-            .unzip();
-
-            data = sdr.into_vec();
-        }
+                gamut: ColorGamut::default(),
+                transfer: ultrahdr_core::ColorTransfer::default(),
+                data: sdr_data,
+                stride: 0,
+            },
+            &ultrahdr_core::GainMapConfig {
+                scale_factor: 1,
+                gamma: 1.0,
+                multi_channel: color_type.samples() > 1,
+                ..Default::default()
+            },
+            ultrahdr_core::Unstoppable,
+        )?)
+        .unzip();
     }
 
     let image = AlohaImage {
         width,
         height,
-        color_type: ColorType::from(&color_type),
-        bit_depth: crate::aloha::from_png_bit_depth(&bit_depth)?,
+        color_type: ColorType::try_from(&color_type)?,
+        bit_depth: match bit_depth {
+            Eight => 8,
+            Sixteen => 16,
+            _ => bail!("Unsupported bit depth: {}", bit_depth as u8),
+        },
         compression: 1,
         has_gain_map,
         icc_profile,
@@ -109,7 +133,11 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
     let mut info = png::Info::with_size(image.width, image.height);
 
     info.color_type = png::ColorType::from(&image.color_type);
-    info.bit_depth = crate::aloha::to_png_bit_depth(image.bit_depth)?;
+    info.bit_depth = match image.bit_depth {
+        8 => png::BitDepth::Eight,
+        16 => png::BitDepth::Sixteen,
+        other => bail!("Invalid bit depth: {other}"),
+    };
 
     if let Some(p) = &image.palette {
         info.palette = Some(std::borrow::Cow::Borrowed(p));
@@ -132,16 +160,15 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         });
 
         Some(ultrahdr_core::gainmap::apply_gainmap(
-            &ultrahdr_core::PixelBuffer::from_vec(
-                image.data.clone(),
-                image.width,
-                image.height,
-                ultrahdr_core::descriptor_for(
-                    png_info_to_uhdr_pf(&info.color_type, &info.bit_depth)?,
-                    ultrahdr_core::ColorPrimaries::Bt2020,
-                    ultrahdr_core::TransferFunction::Pq,
-                ),
-            )?,
+            &ultrahdr_core::RawImage {
+                width: image.width,
+                height: image.height,
+                format: ultrahdr_core::PixelFormat::Rgb8,
+                gamut: ColorGamut::default(),
+                transfer: ultrahdr_core::ColorTransfer::default(),
+                data: image.data.clone(),
+                stride: 1,
+            },
             gain_map,
             metadata,
             4.0,
@@ -152,14 +179,14 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         None
     };
 
-    let enc = png::Encoder::with_info(
+    let mut writer = png::Encoder::with_info(
         std::io::BufWriter::new(std::fs::File::create(png_path)?),
         info,
-    )?;
+    )?
+    .write_header()?;
 
-    let mut writer = enc.write_header()?;
     if let Some(hdr) = hdr_data {
-        writer.write_image_data(&hdr.as_slice().contiguous_bytes())?;
+        writer.write_image_data(&hdr.data)?;
     } else {
         writer.write_image_data(&image.data)?;
     }
@@ -167,8 +194,67 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
     Ok(())
 }
 
-// TODO: Implement gain map extraction from .jpeg
 pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
+    let file_data = std::fs::read(jpeg_path)?;
+    if let Ok(decoder) = ultrahdr_rs::Decoder::new(&file_data) {
+        if decoder.is_ultrahdr() {
+            let sdr = decoder.primary_jpeg().context("Image data is missing")?;
+            let mut sdr_dec = jpeg_decoder::Decoder::new(sdr);
+            let sdr_data = sdr_dec.decode()?;
+            let sdr_info = sdr_dec.info().context("Image info is missing")?;
+            let icc_profile = sdr_dec.icc_profile();
+
+            let gain_map = decoder
+                .gainmap_jpeg()
+                .context("Image must have a gain map but it's absent")?;
+            let mut gm_dec = jpeg_decoder::Decoder::new(gain_map);
+            let gm_data = gm_dec.decode()?;
+            let gm_info = gm_dec
+                .info()
+                .context("Image must have a gain map info but it's absent")?;
+
+            let gm = ultrahdr_rs::GainMap {
+                width: gm_info.width as u32,
+                height: gm_info.height as u32,
+                channels: match gm_info.pixel_format {
+                    jpeg_decoder::PixelFormat::L8 | jpeg_decoder::PixelFormat::L16 => 1,
+                    jpeg_decoder::PixelFormat::RGB24 => 3,
+                    other => bail!("Unsupported pixel format: {other:?}"),
+                },
+                data: gm_data,
+            };
+
+            let gmmd = decoder
+                .metadata()
+                .context("Image must have a gain map's metadata but it's absent")?
+                .to_owned();
+
+            let image = AlohaImage {
+                width: sdr_info.width as u32,
+                height: sdr_info.height as u32,
+                color_type: ColorType::try_from(&sdr_info.pixel_format)?,
+                bit_depth: from_jpeg_bit_depth(&sdr_info.pixel_format)?,
+                compression: 1,
+                has_gain_map: true,
+                icc_profile,
+                palette: None,
+                metadata: Metadata {
+                    author: None,
+                    source: Some(format!(
+                        "Converted from {}",
+                        jpeg_path.to_str().unwrap_or("<NOT FOUND>")
+                    )),
+                },
+                data: sdr_data,
+                gain_map_metadata: Some(gmmd),
+                gain_map: Some(gm),
+            };
+
+            write_aloha(aloha_path, &image)?;
+            return Ok(());
+        }
+    }
+
     let mut reader = jpeg_decoder::Decoder::new(std::fs::File::open(jpeg_path)?);
     let data = reader.decode()?;
 
@@ -181,7 +267,7 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
         width: info.width as u32,
         height: info.height as u32,
         color_type: ColorType::try_from(&info.pixel_format)?,
-        bit_depth: crate::aloha::from_jpeg_bit_depth(&info.pixel_format)?,
+        bit_depth: from_jpeg_bit_depth(&info.pixel_format)?,
         compression: 1,
         has_gain_map: false,
         icc_profile: reader.icc_profile(),
@@ -205,6 +291,54 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
 pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
     let image = read_aloha(aloha_path)?;
 
+    if image.has_gain_map {
+        let Some(gain_map) = &image.gain_map else {
+            bail!("Image must have a gain map but it's absent");
+        };
+
+        let Some(gain_map_metadata) = &image.gain_map_metadata else {
+            bail!("Image must have a gain map's metadata but it's absent");
+        };
+
+        let mut sdr_jpeg = Vec::new();
+        let mut sdr_enc = jpeg_encoder::Encoder::new(&mut sdr_jpeg, 90);
+        if let Some(icc_profile) = &image.icc_profile {
+            sdr_enc.add_icc_profile(icc_profile)?;
+        }
+
+        sdr_enc.encode(
+            &image.data,
+            image.width as u16,
+            image.height as u16,
+            jpeg_encoder::ColorType::try_from(&image.color_type)?,
+        )?;
+
+        let mut gm_jpeg = Vec::new();
+        let gm_color = match gain_map.channels {
+            1 => jpeg_encoder::ColorType::Luma,
+            3 => jpeg_encoder::ColorType::Rgb,
+            _ => bail!("Unsupported channels count"),
+        };
+
+        let gm_enc = jpeg_encoder::Encoder::new(&mut gm_jpeg, 85);
+        gm_enc.encode(
+            &gain_map.data,
+            gain_map.width as u16,
+            gain_map.height as u16,
+            gm_color,
+        )?;
+
+        let uhdr_bytes = ultrahdr_rs::encode_ultrahdr(
+            &sdr_jpeg,
+            &gm_jpeg,
+            gain_map_metadata,
+            ColorGamut::Bt709,
+        )?;
+
+        std::fs::write(jpeg_path, uhdr_bytes)?;
+        return Ok(());
+    }
+
     let mut enc = jpeg_encoder::Encoder::new_file(jpeg_path, 90)?;
     if let Some(icc) = image.icc_profile {
         enc.add_icc_profile(&icc)?;
@@ -214,7 +348,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
         &image.data,
         image.width as u16,
         image.height as u16,
-        jpeg_encoder::ColorType::Rgb,
+        jpeg_encoder::ColorType::try_from(&image.color_type)?,
     )?;
 
     Ok(())

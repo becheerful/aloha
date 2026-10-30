@@ -30,6 +30,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ultrahdr-core",
+ "ultrahdr-rs",
  "zencodec",
 ]
 
@@ -172,17 +173,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "garb"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b968bb36272be4662f264fd123e96915e7dd51c8ca529c2d35f621817ff4207"
-dependencies = [
- "archmage",
- "bytemuck",
- "paste",
-]
-
-[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -192,6 +182,12 @@ dependencies = [
  "crunchy",
  "zerocopy",
 ]
+
+[[package]]
+name = "imgref"
+version = "1.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
 
 [[package]]
 name = "itoa"
@@ -270,6 +266,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "moxcms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+dependencies = [
+ "num-traits",
+ "pxfm",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -278,18 +284,6 @@ dependencies = [
  "autocfg",
  "libm",
 ]
-
-[[package]]
-name = "once_cell"
-version = "1.21.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "png"
@@ -312,6 +306,12 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "pxfm"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "quote"
@@ -343,10 +343,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgb"
+version = "0.8.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "safe_arch"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "safe_unaligned_simd"
@@ -447,9 +465,9 @@ dependencies = [
 
 [[package]]
 name = "ultrahdr-core"
-version = "0.6.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af411a89dd994324c442cea3fa0ded10aac0550cadb9a5cb2ba03c9596a4ed05"
+checksum = "964a038e0f75524ef9bd01ee6bda6d2457a3b6c1ca8df22478b9bb94b3547669"
 dependencies = [
  "archmage",
  "bytemuck",
@@ -458,11 +476,24 @@ dependencies = [
  "linear-srgb",
  "magetypes",
  "thiserror",
- "whereat",
- "zencodec",
- "zenpixels",
- "zenpixels-convert",
- "zentone",
+ "wide",
+]
+
+[[package]]
+name = "ultrahdr-rs"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d23de1da522be7d8abe8e7ebba3b99f08ac9ed0fcb1b16d01c60cfa96addbe"
+dependencies = [
+ "bytemuck",
+ "enough",
+ "half",
+ "imgref",
+ "moxcms",
+ "rgb",
+ "thiserror",
+ "ultrahdr-core",
+ "wide",
 ]
 
 [[package]]
@@ -476,6 +507,16 @@ name = "whereat"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab90f361db038ba3135da12c938c328fb43a012992101879e3d6ebccb4d7eba8"
+
+[[package]]
+name = "wide"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
+]
 
 [[package]]
 name = "winarm-cpufeatures"
@@ -503,36 +544,6 @@ checksum = "5851fd39b312749a3c367a0cd3522bd95d43276cfa613e9c18df748447cef3a8"
 dependencies = [
  "bytemuck",
  "whereat",
-]
-
-[[package]]
-name = "zenpixels-convert"
-version = "0.2.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf516a64a98f08fa2aa19e86f1389e49894f750441044d65369687cf88a1b8dd"
-dependencies = [
- "archmage",
- "bytemuck",
- "garb",
- "libm",
- "linear-srgb",
- "magetypes",
- "once_cell",
- "paste",
- "whereat",
- "zenpixels",
-]
-
-[[package]]
-name = "zentone"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c602cc9010340287fd4ffcb2cd1ae9f6a665d37db59f0b9578352788cf8b304"
-dependencies = [
- "archmage",
- "libm",
- "linear-srgb",
- "magetypes",
 ]
 
 [[package]]

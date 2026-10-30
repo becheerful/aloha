@@ -16,6 +16,16 @@ pub enum ColorType {
 }
 
 impl ColorType {
+    pub fn from_channels_count(channels: usize) -> Result<Self> {
+        Ok(match channels {
+            1 => Self::Grayscale,
+            2 => Self::GrayscaleAlpha,
+            3 => Self::Rgb,
+            4 => Self::Rgba,
+            _ => bail!("Unsupported channels count: {channels}"),
+        })
+    }
+
     pub fn channels(&self) -> usize {
         match self {
             Self::Grayscale | Self::Indexed => 1,
@@ -52,7 +62,7 @@ impl TryFrom<&jpeg_decoder::PixelFormat> for ColorType {
             L8 => Self::Grayscale,
             L16 => Self::Grayscale,
             RGB24 => Self::Rgb,
-            CMYK32 => bail!("CMYK is unsupported"),
+            _ => bail!("Unsupported pixel format: {value:?}"),
         })
     }
 }
@@ -85,36 +95,21 @@ impl From<&ColorType> for png::ColorType {
     }
 }
 
+impl TryFrom<&ColorType> for jpeg_encoder::ColorType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &ColorType) -> Result<Self, Self::Error> {
+        use jpeg_encoder::ColorType::*;
+        Ok(match value {
+            ColorType::Grayscale => Luma,
+            ColorType::Rgb => Rgb,
+            _ => bail!("Unsupported color type: {}", *value as u8),
+        })
+    }
+}
+
 pub fn get_sample_mask(bit_depth: u8) -> u16 {
     if bit_depth == 8 { 0xFF } else { 0xFFFF }
-}
-
-pub fn from_png_bit_depth(value: &png::BitDepth) -> Result<u8> {
-    use png::BitDepth::*;
-    Ok(match value {
-        Eight => 8,
-        Sixteen => 16,
-        _ => bail!("Unsupported bit depth: {}", *value as u8),
-    })
-}
-
-pub fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
-    use jpeg_decoder::PixelFormat::*;
-    Ok(match value {
-        L8 => 8,
-        L16 => 16,
-        RGB24 => 8,
-        CMYK32 => bail!("CMYK is unsupported"),
-    })
-}
-
-pub fn to_png_bit_depth(value: u8) -> Result<png::BitDepth> {
-    use png::BitDepth::*;
-    Ok(match value {
-        8 => Eight,
-        16 => Sixteen,
-        _ => bail!("Invalid bit depth {value}"),
-    })
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -164,8 +159,10 @@ impl AlohaImage {
             bail!("The data size {actual_size} does not match the expected {expected_size}");
         }
 
-        if let Some(gain_map) = &self.gain_map {
-            gain_map.validate()?;
+        // TODO: Validate gain map
+
+        if let Some(gain_map_metadata) = &self.gain_map_metadata {
+            gain_map_metadata.validate()?;
         }
 
         Ok(())
@@ -243,7 +240,7 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     let compressed = match image.compression {
         0 => Ok(image.data.clone()),
         1 => {
-            let filtered = if image.color_type.is_indexed() {
+            let filtered = if !image.color_type.is_indexed() {
                 delta_encode(
                     &image.data,
                     image.width as usize,
@@ -273,12 +270,11 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
         };
 
         for i in 0..3 {
-            let channel = gain_map_params.channels[i];
-            buffer.extend(channel.min.to_le_bytes());
-            buffer.extend(channel.max.to_le_bytes());
-            buffer.extend(channel.gamma.to_le_bytes());
-            buffer.extend(channel.base_offset.to_le_bytes());
-            buffer.extend(channel.alternate_offset.to_le_bytes());
+            buffer.extend(gain_map_params.gain_map_max[i].to_le_bytes());
+            buffer.extend(gain_map_params.gain_map_min[i].to_le_bytes());
+            buffer.extend(gain_map_params.gamma[i].to_le_bytes());
+            buffer.extend(gain_map_params.base_offset[i].to_le_bytes());
+            buffer.extend(gain_map_params.alternate_offset[i].to_le_bytes());
         }
 
         buffer.extend(gain_map_params.base_hdr_headroom.to_le_bytes());
@@ -295,8 +291,8 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
             &gain_map.data,
             gain_map.width as usize,
             gain_map.height as usize,
-            &ColorType::Grayscale, // grayscale, since a gain map stores only coefficients
-            8,                     // bit depth for gain map is always 8
+            &ColorType::from_channels_count(gain_map.channels as usize)?,
+            8, // bit depth for gain map is always 8
         );
 
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
@@ -425,21 +421,18 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     let mut gain_map = None;
 
     if has_gain_map {
-        let mut channels = Vec::new();
-        for _ in 0..3 {
-            let min = read_f64(&mut r, &mut buffer)?;
-            let max = read_f64(&mut r, &mut buffer)?;
-            let gamma = read_f64(&mut r, &mut buffer)?;
-            let base_offset = read_f64(&mut r, &mut buffer)?;
-            let alternate_offset = read_f64(&mut r, &mut buffer)?;
+        let mut gain_map_max = [0.0f64; 3];
+        let mut gain_map_min = [0.0f64; 3];
+        let mut gamma = [0.0f64; 3];
+        let mut base_offset = [0.0f64; 3];
+        let mut alternate_offset = [0.0f64; 3];
 
-            channels.push(zencodec::GainMapChannel {
-                min,
-                max,
-                gamma,
-                base_offset,
-                alternate_offset,
-            });
+        for i in 0..3 {
+            gain_map_max[i] = read_f64(&mut r, &mut buffer)?;
+            gain_map_min[i] = read_f64(&mut r, &mut buffer)?;
+            gamma[i] = read_f64(&mut r, &mut buffer)?;
+            base_offset[i] = read_f64(&mut r, &mut buffer)?;
+            alternate_offset[i] = read_f64(&mut r, &mut buffer)?;
         }
 
         let base_hdr_headroom = read_f64(&mut r, &mut buffer)?;
@@ -457,7 +450,11 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
 
         // this mess is due to the fact that the `GainMapMetadata` is non-exhaustive
         let mut gmmd = ultrahdr_core::GainMapMetadata::default();
-        gmmd.channels = channels[..3].try_into()?;
+        gmmd.gain_map_max = gain_map_max;
+        gmmd.gain_map_min = gain_map_min;
+        gmmd.gamma = gamma;
+        gmmd.base_offset = base_offset;
+        gmmd.alternate_offset = alternate_offset;
         gmmd.base_hdr_headroom = base_hdr_headroom;
         gmmd.alternate_hdr_headroom = alternate_hdr_headroom;
         gmmd.use_base_color_space = use_base_color_space;
@@ -481,11 +478,11 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
         dec.read_to_end(&mut filtered)?;
 
         let data = delta_decode(
-            &data,
+            &filtered,
             width as usize,
             height as usize,
-            &color_type,
-            bit_depth,
+            &ColorType::from_channels_count(channels as usize)?,
+            8,
         );
 
         gain_map = Some(ultrahdr_core::GainMap {
