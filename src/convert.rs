@@ -3,9 +3,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use ultrahdr_rs::ColorGamut;
 
-use crate::aloha::{AlohaImage, ColorType, Metadata, read_aloha, write_aloha};
+use crate::aloha::{AlohaImage, ColorProfileDesc, ColorType, Metadata, read_aloha, write_aloha};
 
-pub fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
+fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
     use jpeg_decoder::PixelFormat::*;
     Ok(match value {
         L8 | RGB24 => 8,
@@ -33,9 +33,17 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
     let info = reader.next_frame(&mut data)?;
     data.truncate(info.buffer_size());
 
+    let mut aloha_cicp = None;
+
     let mut has_gain_map = false;
     if let Some(cicp) = cicp {
         has_gain_map = cicp.transfer_function == 16 || cicp.transfer_function == 18;
+        aloha_cicp = Some(zencodec::Cicp::new(
+            cicp.color_primaries,
+            cicp.transfer_function,
+            cicp.matrix_coefficients,
+            cicp.is_video_full_range_image,
+        ));
     }
 
     let mut gain_map_metadata = None;
@@ -47,6 +55,23 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
             bail!("Image must have cICP chunk but it's absent");
         };
 
+        use ultrahdr_core::ColorTransfer::*;
+        let transfer = match cicp.transfer_function {
+            1 | 6 | 14 | 15 => Srgb,
+            8 => Linear,
+            16 => Pq,
+            18 => Hlg,
+            other => bail!("Unknown transfer function: {other}"),
+        };
+
+        use ColorGamut::*;
+        let gamut = match cicp.color_primaries {
+            1 => Bt709,
+            9 => Bt2020,
+            12 => DisplayP3,
+            other => bail!("Unknown color gamut: {other}"),
+        };
+
         use png::ColorType::*;
         use ultrahdr_core::PixelFormat::*;
         let format = match (color_type, bit_depth) {
@@ -55,38 +80,18 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
             (ct, bd) => bail!("Unsupported pixel format: {ct:?}, {}-bit", bd as u8),
         };
 
-        use ultrahdr_core::ColorTransfer::*;
-        let hdr_image = ultrahdr_core::RawImage {
-            width,
-            height,
-            format,
-            gamut: ColorGamut::default(),
-            transfer: match cicp.transfer_function {
-                1 | 6 | 14 | 15 => Srgb,
-                16 => Pq,
-                18 => Hlg,
-                other => bail!("Unknown transfer function: {other}"),
-            },
-            data,
-            stride: 0,
-        };
+        let hdr_image =
+            ultrahdr_core::RawImage::from_data(width, height, format, gamut, transfer, data)?;
 
-        let sdr_data =
-            ultrahdr_core::color::tonemap_image_to_srgb8(&hdr_image, ColorGamut::default())?;
-
+        let sdr_data = ultrahdr_core::color::tonemap_image_to_srgb8(&hdr_image, gamut)?;
         data = sdr_data.clone();
+
+        let sdr_image =
+            ultrahdr_core::RawImage::from_data(width, height, format, gamut, transfer, sdr_data)?;
 
         (gain_map, gain_map_metadata) = Some(ultrahdr_core::gainmap::compute_gainmap(
             &hdr_image,
-            &ultrahdr_rs::RawImage {
-                width,
-                height,
-                format,
-                gamut: ColorGamut::default(),
-                transfer: ultrahdr_core::ColorTransfer::default(),
-                data: sdr_data,
-                stride: 0,
-            },
+            &sdr_image,
             &ultrahdr_core::GainMapConfig {
                 scale_factor: 1,
                 gamma: 1.0,
@@ -107,8 +112,16 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
             Sixteen => 16,
             _ => bail!("Unsupported bit depth: {}", bit_depth as u8),
         },
+        color_profile_desc: if aloha_cicp.is_some() {
+            ColorProfileDesc::Cicp
+        } else if icc_profile.is_some() {
+            ColorProfileDesc::Icc
+        } else {
+            ColorProfileDesc::None
+        },
         compression: 1,
         has_gain_map,
+        cicp: aloha_cicp,
         icc_profile,
         palette,
         metadata: crate::aloha::Metadata {
@@ -139,36 +152,64 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         other => bail!("Invalid bit depth: {other}"),
     };
 
-    if let Some(p) = &image.palette {
-        info.palette = Some(std::borrow::Cow::Borrowed(p));
+    if let Some(cicp) = &image.cicp {
+        info.coding_independent_code_points = Some(png::CodingIndependentCodePoints {
+            color_primaries: cicp.color_primaries,
+            transfer_function: cicp.transfer_characteristics,
+            matrix_coefficients: cicp.matrix_coefficients,
+            is_video_full_range_image: cicp.full_range,
+        });
     }
 
     if let Some(icc) = &image.icc_profile {
         info.icc_profile = Some(std::borrow::Cow::Borrowed(icc));
     }
 
-    let hdr_data = if let Some(metadata) = &image.gain_map_metadata {
-        let Some(gain_map) = &image.gain_map else {
-            bail!("Image must have gain map but it's absent");
+    if let Some(p) = &image.palette {
+        info.palette = Some(std::borrow::Cow::Borrowed(p));
+    }
+
+    let hdr_data = if image.has_gain_map {
+        let Some(cicp) = &image.cicp else {
+            bail!("Image must have coding-independent code points but they're absent");
         };
 
-        info.coding_independent_code_points = Some(png::CodingIndependentCodePoints {
-            color_primaries: 9,
-            transfer_function: 16,
-            matrix_coefficients: 0,
-            is_video_full_range_image: true,
-        });
+        let Some(gain_map) = &image.gain_map else {
+            bail!("Image must have a gain map but it's absent");
+        };
 
+        let Some(metadata) = &image.gain_map_metadata else {
+            bail!("Image must have a gain map's metadata but it's absent");
+        };
+
+        use ultrahdr_core::ColorGamut::*;
+        use ultrahdr_core::ColorTransfer::*;
+        use ultrahdr_core::PixelFormat::*;
         Some(ultrahdr_core::gainmap::apply_gainmap(
-            &ultrahdr_core::RawImage {
-                width: image.width,
-                height: image.height,
-                format: ultrahdr_core::PixelFormat::Rgb8,
-                gamut: ColorGamut::default(),
-                transfer: ultrahdr_core::ColorTransfer::default(),
-                data: image.data.clone(),
-                stride: 1,
-            },
+            &ultrahdr_core::RawImage::from_data(
+                image.width,
+                image.height,
+                match (image.color_type, image.bit_depth) {
+                    (ColorType::Rgb, 8) => Rgb8,
+                    (ColorType::Rgba, 8) => Rgba8,
+                    (ColorType::Grayscale, 8) => Gray8,
+                    (ct, bd) => bail!("Unsupported pixel format: {ct:?}, {bd}-bit",),
+                },
+                match cicp.color_primaries {
+                    1 => Bt709,
+                    9 => Bt2020,
+                    12 => DisplayP3,
+                    other => bail!("Unknown color gamut: {other}"),
+                },
+                match cicp.transfer_characteristics {
+                    1 | 6 | 14 | 15 => Srgb,
+                    8 => Linear,
+                    16 => Pq,
+                    18 => Hlg,
+                    other => bail!("Unknown transfer function: {other}"),
+                },
+                image.data.clone(),
+            )?,
             gain_map,
             metadata,
             4.0,
@@ -213,12 +254,13 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 .info()
                 .context("Image must have a gain map info but it's absent")?;
 
+            use jpeg_decoder::PixelFormat::*;
             let gm = ultrahdr_rs::GainMap {
                 width: gm_info.width as u32,
                 height: gm_info.height as u32,
                 channels: match gm_info.pixel_format {
-                    jpeg_decoder::PixelFormat::L8 | jpeg_decoder::PixelFormat::L16 => 1,
-                    jpeg_decoder::PixelFormat::RGB24 => 3,
+                    L8 | L16 => 1,
+                    RGB24 => 3,
                     other => bail!("Unsupported pixel format: {other:?}"),
                 },
                 data: gm_data,
@@ -234,8 +276,14 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 height: sdr_info.height as u32,
                 color_type: ColorType::try_from(&sdr_info.pixel_format)?,
                 bit_depth: from_jpeg_bit_depth(&sdr_info.pixel_format)?,
+                color_profile_desc: if icc_profile.is_some() {
+                    ColorProfileDesc::Icc
+                } else {
+                    ColorProfileDesc::None
+                },
                 compression: 1,
                 has_gain_map: true,
+                cicp: None,
                 icc_profile,
                 palette: None,
                 metadata: Metadata {
@@ -263,14 +311,22 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
         bail!("Can't read info");
     };
 
+    let icc_profile = reader.icc_profile();
+
     let image = AlohaImage {
         width: info.width as u32,
         height: info.height as u32,
         color_type: ColorType::try_from(&info.pixel_format)?,
         bit_depth: from_jpeg_bit_depth(&info.pixel_format)?,
+        color_profile_desc: if icc_profile.is_some() {
+            ColorProfileDesc::Icc
+        } else {
+            ColorProfileDesc::None
+        },
         compression: 1,
         has_gain_map: false,
-        icc_profile: reader.icc_profile(),
+        cicp: None,
+        icc_profile,
         palette: None,
         metadata: Metadata {
             author: None,

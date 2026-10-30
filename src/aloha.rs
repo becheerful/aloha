@@ -120,14 +120,37 @@ pub struct Metadata {
     pub source: Option<String>,
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorProfileDesc {
+    None,
+    Cicp,
+    Icc,
+}
+
+impl TryFrom<u8> for ColorProfileDesc {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0 => Self::None,
+            1 => Self::Cicp,
+            2 => Self::Icc,
+            _ => bail!("Unknown color profile's descriptor: {value}"),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AlohaImage {
     pub width: u32,
     pub height: u32,
     pub color_type: ColorType,
     pub bit_depth: u8,
+    pub color_profile_desc: ColorProfileDesc,
     pub compression: u8,
     pub has_gain_map: bool,
+    pub cicp: Option<zencodec::Cicp>,
     pub icc_profile: Option<Vec<u8>>,
     pub palette: Option<Vec<u8>>,
     pub metadata: Metadata,
@@ -210,21 +233,36 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
 
     buffer.push(image.color_type as u8);
     buffer.push(image.bit_depth);
+    buffer.push(image.color_profile_desc as u8);
     buffer.push(image.compression);
     buffer.push(image.has_gain_map as u8);
 
+    // Writing the cICP section
+    if matches!(image.color_profile_desc, ColorProfileDesc::Cicp) {
+        let Some(cicp) = &image.cicp else {
+            bail!("Image must have coding-independent code points but they're absent");
+        };
+
+        buffer.push(cicp.color_primaries);
+        buffer.push(cicp.transfer_characteristics);
+        buffer.push(cicp.matrix_coefficients);
+        buffer.push(cicp.full_range as u8);
+    }
+
     // Writing the ICC profile section
-    if let Some(icc) = &image.icc_profile {
+    if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
+        let Some(icc) = &image.icc_profile else {
+            bail!("Image must have an ICC profile but it's absent");
+        };
+
         buffer.extend((icc.len() as u32).to_le_bytes());
         buffer.extend(icc);
-    } else {
-        buffer.extend(0u32.to_le_bytes());
     }
 
     // Writing the palette section
     if image.color_type.is_indexed() {
         let Some(p) = &image.palette else {
-            bail!("Image's color type is Indexed, but a palette is missing");
+            bail!("Image must have a palette but it's absent");
         };
 
         buffer.extend((p.len() as u16).to_le_bytes());
@@ -352,6 +390,10 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     buffer.push(bit_depth);
 
     r.read_exact(&mut one)?;
+    buffer.extend(&one);
+    let color_profile_desc = ColorProfileDesc::try_from(one[0])?;
+
+    r.read_exact(&mut one)?;
     let compression = one[0];
     buffer.push(compression);
 
@@ -359,15 +401,45 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     buffer.extend(&one);
     let has_gain_map = one[0] != 0;
 
-    // Reading the ICC profile section
-    let icc_profile_len = read_u32(&mut r, &mut buffer)?;
-    let icc_profile = if icc_profile_len == 0 {
-        None
+    // Reading the cICP section
+    let cicp = if matches!(color_profile_desc, ColorProfileDesc::Cicp) {
+        r.read_exact(&mut one)?;
+        let color_primaries = one[0];
+        buffer.push(color_primaries);
+
+        r.read_exact(&mut one)?;
+        let transfer_characteristics = one[0];
+        buffer.push(transfer_characteristics);
+
+        r.read_exact(&mut one)?;
+        let matrix_coefficients = one[0];
+        buffer.push(matrix_coefficients);
+
+        r.read_exact(&mut one)?;
+        buffer.extend(&one);
+        let full_range = one[0] != 0;
+
+        Some(zencodec::Cicp::new(
+            color_primaries,
+            transfer_characteristics,
+            matrix_coefficients,
+            full_range,
+        ))
     } else {
+        None
+    };
+
+    // Reading the ICC profile section
+    let icc_profile = if matches!(color_profile_desc, ColorProfileDesc::Icc) {
+        let icc_profile_len = read_u32(&mut r, &mut buffer)?;
+
         let mut icc_bytes = vec![0u8; icc_profile_len as usize];
         r.read_exact(&mut icc_bytes)?;
         buffer.extend(&icc_bytes);
+
         Some(icc_bytes)
+    } else {
+        None
     };
 
     // Reading the palette section
@@ -513,9 +585,11 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
         height,
         color_type,
         bit_depth,
-        icc_profile,
+        color_profile_desc,
         compression,
         has_gain_map,
+        cicp,
+        icc_profile,
         palette,
         metadata,
         data,
