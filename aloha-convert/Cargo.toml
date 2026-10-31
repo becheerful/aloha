@@ -1,0 +1,15 @@
+[package]
+name = "aloha-convert"
+version = "0.4.0"
+edition.workspace = true
+description = "Conversion between ALOHA, PNG, and JPEG"
+
+[dependencies]
+aloha-core = { path = "../aloha-core" }
+anyhow = "1.0"
+png = "0.17"
+jpeg-decoder = "0.3"
+jpeg-encoder = "0.7"
+ultrahdr-core.workspace = true
+ultrahdr-rs = "0.3"
+zencodec.workspace = true

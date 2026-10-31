@@ -2,7 +2,6 @@ use std::path::Path;
 
 use anyhow::bail;
 
-mod aloha;
 mod convert;
 
 fn main() -> anyhow::Result<()> {

@@ -1,0 +1,14 @@
+[package]
+name = "aloha-core"
+version = "0.4.0"
+edition.workspace = true
+description = "Core types and codec for the ALOHA image format"
+
+[dependencies]
+thiserror = "2.0"
+flate2 = "1.1"
+crc32fast = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ultrahdr-core.workspace = true
+zencodec.workspace = true

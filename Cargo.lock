@@ -18,19 +18,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "aloha"
+name = "aloha-convert"
 version = "0.4.0"
 dependencies = [
+ "aloha-core",
  "anyhow",
- "crc32fast",
- "flate2",
  "jpeg-decoder",
  "jpeg-encoder",
  "png",
- "serde",
- "serde_json",
  "ultrahdr-core",
  "ultrahdr-rs",
+ "zencodec",
+]
+
+[[package]]
+name = "aloha-core"
+version = "0.4.0"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ultrahdr-core",
  "zencodec",
 ]
 

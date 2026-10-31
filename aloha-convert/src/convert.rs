@@ -2,15 +2,76 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::aloha::{AlohaImage, ColorProfileDesc, ColorType, Metadata, read_aloha, write_aloha};
+use aloha_core::{
+    AlohaImage, Metadata,
+    color::{ColorProfileDesc, ColorType},
+    read_aloha, write_aloha,
+};
 
-fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
-    use jpeg_decoder::PixelFormat::*;
-    Ok(match value {
-        L8 | RGB24 => 8,
-        L16 => 16,
-        other => bail!("Unsupported pixel format: {other:?}"),
-    })
+mod png_conv {
+    pub(crate) fn color_type_from_aloha(ct: &super::ColorType) -> png::ColorType {
+        use super::ColorType;
+        use png::ColorType::*;
+
+        match ct {
+            ColorType::Grayscale => Grayscale,
+            ColorType::GrayscaleAlpha => GrayscaleAlpha,
+            ColorType::Rgb => Rgb,
+            ColorType::Rgba => Rgba,
+            ColorType::Indexed => Indexed,
+        }
+    }
+
+    pub(crate) fn color_type_to_aloha(ct: &png::ColorType) -> super::ColorType {
+        use super::ColorType;
+        use png::ColorType::*;
+
+        match ct {
+            Grayscale => ColorType::Grayscale,
+            Rgb => ColorType::Rgb,
+            Indexed => ColorType::Indexed,
+            GrayscaleAlpha => ColorType::GrayscaleAlpha,
+            Rgba => ColorType::Rgba,
+        }
+    }
+}
+
+mod jpeg_conv {
+    use anyhow::{Result, bail};
+
+    pub(crate) fn color_type_from_aloha(ct: &super::ColorType) -> Result<jpeg_encoder::ColorType> {
+        use super::ColorType;
+        use jpeg_encoder::ColorType::*;
+
+        Ok(match ct {
+            ColorType::Grayscale => Luma,
+            ColorType::Rgb => Rgb,
+            _ => bail!("Unsupported color type: {}", *ct as u8),
+        })
+    }
+
+    pub(crate) fn pixel_format_to_aloha(
+        pf: &jpeg_decoder::PixelFormat,
+    ) -> Result<super::ColorType> {
+        use super::ColorType::*;
+        use jpeg_decoder::PixelFormat::*;
+
+        Ok(match pf {
+            L8 => Grayscale,
+            L16 => Grayscale,
+            RGB24 => Rgb,
+            _ => bail!("Unsupported pixel format: {pf:?}"),
+        })
+    }
+
+    pub(crate) fn bit_depth_to_aloha(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
+        use jpeg_decoder::PixelFormat::*;
+        Ok(match value {
+            L8 | RGB24 => 8,
+            L16 => 16,
+            other => bail!("Unsupported pixel format: {other:?}"),
+        })
+    }
 }
 
 fn color_primaries_to_gamut(primaries: u8) -> Result<ultrahdr_core::ColorGamut> {
@@ -115,7 +176,7 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
     let image = AlohaImage {
         width,
         height,
-        color_type: ColorType::try_from(&color_type)?,
+        color_type: png_conv::color_type_to_aloha(&color_type),
         bit_depth: match bit_depth {
             Eight => 8,
             Sixteen => 16,
@@ -133,7 +194,7 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         cicp: aloha_cicp,
         icc_profile,
         palette,
-        metadata: crate::aloha::Metadata {
+        metadata: aloha_core::Metadata {
             author: None,
             source: Some(format!(
                 "Converted from {}",
@@ -154,7 +215,7 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
 
     let mut info = png::Info::with_size(image.width, image.height);
 
-    info.color_type = png::ColorType::from(&image.color_type);
+    info.color_type = png_conv::color_type_from_aloha(&image.color_type);
     info.bit_depth = match image.bit_depth {
         8 => png::BitDepth::Eight,
         16 => png::BitDepth::Sixteen,
@@ -279,8 +340,8 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
             let image = AlohaImage {
                 width: sdr_info.width as u32,
                 height: sdr_info.height as u32,
-                color_type: ColorType::try_from(&sdr_info.pixel_format)?,
-                bit_depth: from_jpeg_bit_depth(&sdr_info.pixel_format)?,
+                color_type: jpeg_conv::pixel_format_to_aloha(&sdr_info.pixel_format)?,
+                bit_depth: jpeg_conv::bit_depth_to_aloha(&sdr_info.pixel_format)?,
                 color_profile_desc: if icc_profile.is_some() {
                     ColorProfileDesc::Icc
                 } else {
@@ -321,8 +382,8 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
     let image = AlohaImage {
         width: info.width as u32,
         height: info.height as u32,
-        color_type: ColorType::try_from(&info.pixel_format)?,
-        bit_depth: from_jpeg_bit_depth(&info.pixel_format)?,
+        color_type: jpeg_conv::pixel_format_to_aloha(&info.pixel_format)?,
+        bit_depth: jpeg_conv::bit_depth_to_aloha(&info.pixel_format)?,
         color_profile_desc: if icc_profile.is_some() {
             ColorProfileDesc::Icc
         } else {
@@ -371,7 +432,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
             &image.data,
             image.width as u16,
             image.height as u16,
-            jpeg_encoder::ColorType::try_from(&image.color_type)?,
+            jpeg_conv::color_type_from_aloha(&image.color_type)?,
         )?;
 
         let mut gm_jpeg = Vec::new();
@@ -414,7 +475,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
         &image.data,
         image.width as u16,
         image.height as u16,
-        jpeg_encoder::ColorType::try_from(&image.color_type)?,
+        jpeg_conv::color_type_from_aloha(&image.color_type)?,
     )?;
 
     Ok(())
