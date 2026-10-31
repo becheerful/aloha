@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use ultrahdr_rs::ColorGamut;
 
 use crate::aloha::{AlohaImage, ColorProfileDesc, ColorType, Metadata, read_aloha, write_aloha};
 
@@ -197,7 +196,7 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         };
 
         let Some(metadata) = &image.gain_map_metadata else {
-            bail!("Image must have a gain map's metadata but it's absent");
+            bail!("Image must have a gain map metadata but it's absent");
         };
 
         use ultrahdr_core::PixelFormat::*;
@@ -274,7 +273,7 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
 
             let gmmd = decoder
                 .metadata()
-                .context("Image must have a gain map's metadata but it's absent")?
+                .context("Image must have a gain map metadata but it's absent")?
                 .to_owned();
 
             let image = AlohaImage {
@@ -359,7 +358,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
         };
 
         let Some(gain_map_metadata) = &image.gain_map_metadata else {
-            bail!("Image must have a gain map's metadata but it's absent");
+            bail!("Image must have a gain map metadata but it's absent");
         };
 
         let mut sdr_jpeg = Vec::new();
@@ -394,7 +393,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
             &sdr_jpeg,
             &gm_jpeg,
             gain_map_metadata,
-            ColorGamut::Bt709,
+            ultrahdr_core::ColorGamut::default(),
         )?;
 
         std::fs::write(jpeg_path, uhdr_bytes)?;

@@ -297,18 +297,13 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     let compressed = match image.compression {
         0 => Ok(image.data.clone()),
         1 => {
-            let filtered = if !image.color_type.is_indexed() {
-                delta_encode(
-                    &image.data,
-                    image.width as usize,
-                    image.height as usize,
-                    &image.color_type,
-                    image.bit_depth,
-                )
-            } else {
-                image.data.clone()
-            };
-
+            let filtered = delta_encode(
+                &image.data,
+                image.width as usize,
+                image.height as usize,
+                &image.color_type,
+                image.bit_depth,
+            );
             let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
             enc.write_all(&filtered)?;
             let compressed = enc.finish()?;
@@ -323,7 +318,7 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> Result<()> {
     if image.has_gain_map {
         // Writing the gain map metadata section
         let Some(gain_map_params) = &image.gain_map_metadata else {
-            bail!("Image must have a gain map's metadata but it's absent");
+            bail!("Image must have a gain map metadata but it's absent");
         };
 
         for i in 0..3 {
