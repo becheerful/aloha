@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aloha-convert"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aloha-core",
  "anyhow",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "aloha-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "crc32fast",
  "flate2",

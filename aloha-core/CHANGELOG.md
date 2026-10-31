@@ -9,3 +9,4 @@
 | 0.2.0                | 0              | 2026-10-25 | Added support for ICC profiles.                                              |
 | 0.3.0                | 0              | 2026-10-27 | Now CRC32 covers the entire file.                                            |
 | 0.4.0                | 0              | 2026-10-31 | Added HDR support.                                                           |
+| 0.5.0                | 0              | 2026-10-31 | Metadata is now non-exhaustive.                                              |

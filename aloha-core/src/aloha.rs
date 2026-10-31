@@ -1,3 +1,12 @@
+//! Reader and writer for the `.aloha` image container format.
+//!
+//! This module implements encoding and decoding of the `.aloha` file format —
+//! a compact, self-describing container for raster images. It is intended as
+//! a low-level building block: it focuses on faithful serialization of pixel
+//! data together with all information required to interpret it correctly
+//! (color management, palette, metadata, and optional HDR gain map), and does
+//! **not** perform any color conversion or pixel format normalization.
+
 use std::io::{Read, Write};
 
 use crate::{
@@ -8,33 +17,87 @@ use crate::{
 const MAGIC: &[u8; 5] = b"ALOHA";
 const VERSION: u16 = 0;
 
+/// Optional metadata associated with an [`AlohaImage`].
+///
+/// This metadata is serialized as JSON within the `.aloha` container.
+/// All fields are optional and omitted from the serialized output when `None`.
+#[non_exhaustive]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct Metadata {
+    /// The name or identifier of the image author, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    ///A description of the image source or origin, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 
+impl Metadata {
+    pub fn from_source(src: impl ToString) -> Self {
+        Self {
+            author: None,
+            source: Some(src.to_string()),
+        }
+    }
+}
+
+/// A fully decoded in-memory representation of an `.aloha` image.
+///
+/// An `AlohaImage` holds the pixel data along with all associated color
+/// information (ICC or cICP profile), optional palette, JSON metadata, and an
+/// optional gain map. Use [`write_aloha`] to encode an instance to disk and
+/// [`read_aloha`] to decode a file back into an `AlohaImage`.
 #[derive(Debug, Clone)]
 pub struct AlohaImage {
+    /// The width of the image in pixels. Must be at least 1.
     pub width: u32,
+    /// The height of the image in pixels. Must be at least 1.
     pub height: u32,
+    /// The color type that describes the channel layout of the pixel data.
     pub color_type: ColorType,
+    /// The number of bits used to represent a single color sample.
+    ///
+    /// For indexed color types, this value must not exceed 8.
     pub bit_depth: u8,
+    /// Describes which color profile representation is used (`cICP`, `ICC` or none).
     pub color_profile_desc: ColorProfileDesc,
+    /// The compression algorithm applied to the pixel data.
+    ///
+    /// - `0` — no compression (raw bytes)
+    /// - `1` — delta encoding followed by zlib compression
     pub compression: u8,
+    /// Whether the image contains an optional gain map.
     pub has_gain_map: bool,
+    /// The cICP color profile, required when `color_profile_desc` is [`ColorProfileDesc::Cicp`].
     pub cicp: Option<zencodec::Cicp>,
+    /// The raw ICC profile bytes, required when `color_profile_desc` is [`ColorProfileDesc::Icc`].
     pub icc_profile: Option<Vec<u8>>,
+    /// The color palette, required when `color_type` is an `Indexed` (4) type.
     pub palette: Option<Vec<u8>>,
+    /// Optional JSON metadata attached to the image.
     pub metadata: Metadata,
+    /// The raw (decompressed) pixel data.
     pub data: Vec<u8>,
+    /// Metadata describing how to interpret the gain map, if `has_gain_map` is `true`.
     pub gain_map_metadata: Option<ultrahdr_core::GainMapMetadata>,
+    /// The gain map image data, if `has_gain_map` is `true`.
     pub gain_map: Option<ultrahdr_core::GainMap>,
 }
 
 impl AlohaImage {
+    /// Validates the internal consistency of this `AlohaImage`.
+    ///
+    /// The following invariants are checked:
+    ///
+    /// - `Indexed` color types have a palette and a bit depth of at most 8.
+    /// - Width and height are both non-zero.
+    /// - The length of `data` matches `width * height * bytes_per_pixel()`.
+    /// - If a gain map is present, its dimensions and data length are valid,
+    ///   and its metadata passes validation
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AlohaError::ValidationError`] if any of the above checks fail.
     pub fn validate(&self) -> AlohaResult {
         if self.color_type.is_indexed() && self.palette.is_none() {
             return Err(AlohaError::ValidationError(
@@ -89,10 +152,19 @@ impl AlohaImage {
         Ok(())
     }
 
+    /// Returns the number of bytes required to store a single pixel.
     pub fn bytes_per_pixel(&self) -> usize {
         (self.bit_depth as usize / 8) * self.color_type.channels()
     }
 
+    /// Reads a single color sample from `data` at the given sample index.
+    ///
+    /// The sample is interpreted as a little-endian unsigned integer and widened
+    /// to `u16`. Only 1-byte and 2-byte samples are supported
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AlohaError::InvalidBytesPerSample`] if `bytes_per_sample` is neither 1 nor 2.
     pub fn read_sample(
         bytes_per_sample: usize,
         data: &[u8],
@@ -106,6 +178,11 @@ impl AlohaImage {
         })
     }
 
+    /// Writes a `u16` value as a little-endian sample into `data`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AlohaError::InvalidBytesPerSample`] if `bytes_per_sample` is neither 1 nor 2.
     pub fn write_sample(
         bytes_per_sample: usize,
         data: &mut [u8],
@@ -125,6 +202,21 @@ impl AlohaImage {
     }
 }
 
+/// Encodes an [`AlohaImage`] to the `.aloha`binary format and writes it to `path`.
+///
+/// The function first calls [`AlohaImage::validate`] to ensure the image is
+/// internally consistent, then serializes the header, optional cICP/ICC/palette/
+/// metadata sections, compressed pixel data, optional gain map, and a trailing
+/// CRC32 checksum.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Validation of `image` fails.
+/// - The file at `path` cannot be created or written to.
+/// - A required section (cICP, ICC, palette, or gain map with its metadata)
+///   is missing when the corresponding flag indicates it should be present.
+/// - The compression algorithm in `image.compression` is unsupported.
 pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
     image.validate()?;
 
@@ -259,6 +351,22 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
     Ok(())
 }
 
+/// Decodes an `.aloha` file from `path` into an [`AlohaImage`].
+///
+/// The function reads the magic bytes and version, parses all sections
+/// (header, optional cICP/ICC/palette/metadata, compressed pixel data, optional
+/// gain map and its metadata), verifies the trailing CRC32 checksum, and finally
+/// validates the decoded image via [`AlohaImage::validate`].
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file does not start with the `ALOHA` magic bytes.
+/// - The version is newer than the supported [`VERSION`].
+/// - A section cannot be parsed correctly.
+/// - The stored CRC32 checksum does not match the computed checksum.
+/// - The compression algorithm is unsupported.
+/// - The decoded image fails validation.
 pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
     let file = std::fs::File::open(path)?;
     let mut buffer: Vec<u8> = Vec::new();
@@ -503,6 +611,15 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
     Ok(image)
 }
 
+/// Applies delta encoding to `data` in-place and returns the encoded bytes.
+///
+/// For each channel, the first sample is stored as-is, and every subsequent
+/// sample is replaced by the wrapping difference from the previous sample in the
+/// same channel. `Indexed` color type is returned unchanged.
+///
+/// # Errors
+///
+/// Propagates errors from [`AlohaImage::read_sample`] and [`AlohaImage::write_sample`].
 fn delta_encode(
     data: &[u8],
     width: usize,
@@ -535,6 +652,15 @@ fn delta_encode(
     Ok(out)
 }
 
+/// Reverses the delta encoding applied by [`delta_decode`].
+///
+/// Each sample is reconstructed by wrapping-adding the delta value to the
+/// previous sample in the same channel. `Indexed` color types are returned
+/// unchanged.
+///
+/// # Errors
+///
+/// Propagates errors from [`AlohaImage::read_sample`] and [`AlohaImage::write_sample`].
 fn delta_decode(
     data: &[u8],
     width: usize,

@@ -194,13 +194,10 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         cicp: aloha_cicp,
         icc_profile,
         palette,
-        metadata: aloha_core::Metadata {
-            author: None,
-            source: Some(format!(
-                "Converted from {}",
-                png_path.to_str().unwrap_or("<NOT FOUND>")
-            )),
-        },
+        metadata: Metadata::from_source(format!(
+            "Converted from {}",
+            png_path.to_str().unwrap_or("<NOT FOUND>")
+        )),
         data,
         gain_map_metadata,
         gain_map,
@@ -352,13 +349,10 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 cicp: None,
                 icc_profile,
                 palette: None,
-                metadata: Metadata {
-                    author: None,
-                    source: Some(format!(
-                        "Converted from {}",
-                        jpeg_path.to_str().unwrap_or("<NOT FOUND>")
-                    )),
-                },
+                metadata: Metadata::from_source(format!(
+                    "Converted from {}",
+                    jpeg_path.to_str().unwrap_or("<NOT FOUND>")
+                )),
                 data: sdr_data,
                 gain_map_metadata: Some(gmmd),
                 gain_map: Some(gm),
@@ -394,13 +388,10 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
         cicp: None,
         icc_profile,
         palette: None,
-        metadata: Metadata {
-            author: None,
-            source: Some(format!(
-                "Converted from {}",
-                jpeg_path.to_str().unwrap_or("<NOT FOUND>")
-            )),
-        },
+        metadata: Metadata::from_source(format!(
+            "Converted from {}",
+            jpeg_path.to_str().unwrap_or("<NOT FOUND>")
+        )),
         data,
         gain_map_metadata: None,
         gain_map: None,
