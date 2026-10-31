@@ -162,7 +162,7 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         other => bail!("Invalid bit depth: {other}"),
     };
 
-    if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
+    if matches!(image.color_profile_desc, ColorProfileDesc::Cicp) {
         let Some(cicp) = &image.cicp else {
             bail!("Image must have coding-independent code points but they're absent")
         };
@@ -175,7 +175,7 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         });
     }
 
-    if matches!(image.color_profile_desc, ColorProfileDesc::Cicp) {
+    if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
         let Some(icc) = &image.icc_profile else {
             bail!("Image must have an ICC profile but it's absent");
         };

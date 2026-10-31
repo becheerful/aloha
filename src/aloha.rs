@@ -179,10 +179,29 @@ impl AlohaImage {
         let actual_size = self.data.len();
         let expected_size = self.width as usize * self.height as usize * self.bytes_per_pixel();
         if actual_size != expected_size {
-            bail!("The data size {actual_size} does not match the expected {expected_size}");
+            bail!(
+                "The image's data size {actual_size} does not match the expected {expected_size}"
+            );
         }
 
-        // TODO: Validate gain map
+        if let Some(gain_map) = &self.gain_map {
+            if gain_map.width < 1 || gain_map.height < 1 {
+                bail!(
+                    "Invalid gain map resolution: {}x{}",
+                    gain_map.width,
+                    gain_map.height
+                );
+            }
+
+            let actual_size = gain_map.data.len();
+            let expected_size =
+                gain_map.width as usize * gain_map.height as usize * gain_map.channels as usize;
+            if actual_size != expected_size {
+                bail!(
+                    "The gain map's data size {actual_size} does not match the expected {expected_size}"
+                );
+            }
+        }
 
         if let Some(gain_map_metadata) = &self.gain_map_metadata {
             gain_map_metadata.validate()?;
