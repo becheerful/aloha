@@ -14,6 +14,27 @@ fn from_jpeg_bit_depth(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
     })
 }
 
+fn color_primaries_to_gamut(primaries: u8) -> Result<ultrahdr_core::ColorGamut> {
+    use ultrahdr_core::ColorGamut::*;
+    Ok(match primaries {
+        1 => Bt709,
+        9 => Bt2020,
+        12 => DisplayP3,
+        other => bail!("Unknown color gamut: {other}"),
+    })
+}
+
+fn convert_transfer_func(tf: u8) -> Result<ultrahdr_core::ColorTransfer> {
+    use ultrahdr_core::ColorTransfer::*;
+    Ok(match tf {
+        1 | 6 | 14 | 15 => Srgb,
+        8 => Linear,
+        16 => Pq,
+        18 => Hlg,
+        other => bail!("Unknown transfer function: {other}"),
+    })
+}
+
 pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
     let mut reader = png::Decoder::new(std::fs::File::open(png_path)?).read_info()?;
     let (width, height, color_type, bit_depth, icc_profile, palette, cicp) = {
@@ -52,32 +73,21 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
     use png::BitDepth::*;
     if has_gain_map {
         let Some(cicp) = cicp else {
-            bail!("Image must have cICP chunk but it's absent");
+            bail!("Image must have coding-independent code points but they're absent");
         };
 
-        use ultrahdr_core::ColorTransfer::*;
-        let transfer = match cicp.transfer_function {
-            1 | 6 | 14 | 15 => Srgb,
-            8 => Linear,
-            16 => Pq,
-            18 => Hlg,
-            other => bail!("Unknown transfer function: {other}"),
-        };
-
-        use ColorGamut::*;
-        let gamut = match cicp.color_primaries {
-            1 => Bt709,
-            9 => Bt2020,
-            12 => DisplayP3,
-            other => bail!("Unknown color gamut: {other}"),
-        };
+        let transfer = convert_transfer_func(cicp.transfer_function)?;
+        let gamut = color_primaries_to_gamut(cicp.color_primaries)?;
 
         use png::ColorType::*;
         use ultrahdr_core::PixelFormat::*;
         let format = match (color_type, bit_depth) {
             (Rgb, Eight) => Rgb8,
-            (Rgba, Eight) => Rgba8,
-            (ct, bd) => bail!("Unsupported pixel format: {ct:?}, {}-bit", bd as u8),
+            (Grayscale, Eight) => Gray8,
+            (ct, bd) => bail!(
+                "Unsupported pixel format for gain map: {ct:?}, {}-bit",
+                bd as u8
+            ),
         };
 
         let hdr_image =
@@ -152,7 +162,11 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         other => bail!("Invalid bit depth: {other}"),
     };
 
-    if let Some(cicp) = &image.cicp {
+    if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
+        let Some(cicp) = &image.cicp else {
+            bail!("Image must have coding-independent code points but they're absent")
+        };
+
         info.coding_independent_code_points = Some(png::CodingIndependentCodePoints {
             color_primaries: cicp.color_primaries,
             transfer_function: cicp.transfer_characteristics,
@@ -161,7 +175,11 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         });
     }
 
-    if let Some(icc) = &image.icc_profile {
+    if matches!(image.color_profile_desc, ColorProfileDesc::Cicp) {
+        let Some(icc) = &image.icc_profile else {
+            bail!("Image must have an ICC profile but it's absent");
+        };
+
         info.icc_profile = Some(std::borrow::Cow::Borrowed(icc));
     }
 
@@ -182,8 +200,6 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
             bail!("Image must have a gain map's metadata but it's absent");
         };
 
-        use ultrahdr_core::ColorGamut::*;
-        use ultrahdr_core::ColorTransfer::*;
         use ultrahdr_core::PixelFormat::*;
         Some(ultrahdr_core::gainmap::apply_gainmap(
             &ultrahdr_core::RawImage::from_data(
@@ -191,23 +207,13 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
                 image.height,
                 match (image.color_type, image.bit_depth) {
                     (ColorType::Rgb, 8) => Rgb8,
-                    (ColorType::Rgba, 8) => Rgba8,
                     (ColorType::Grayscale, 8) => Gray8,
-                    (ct, bd) => bail!("Unsupported pixel format: {ct:?}, {bd}-bit",),
+                    (ct, bd) => {
+                        bail!("Unsupported pixel format for a HDR image: {ct:?}, {bd}-bit",)
+                    }
                 },
-                match cicp.color_primaries {
-                    1 => Bt709,
-                    9 => Bt2020,
-                    12 => DisplayP3,
-                    other => bail!("Unknown color gamut: {other}"),
-                },
-                match cicp.transfer_characteristics {
-                    1 | 6 | 14 | 15 => Srgb,
-                    8 => Linear,
-                    16 => Pq,
-                    18 => Hlg,
-                    other => bail!("Unknown transfer function: {other}"),
-                },
+                color_primaries_to_gamut(cicp.color_primaries)?,
+                convert_transfer_func(cicp.transfer_characteristics)?,
                 image.data.clone(),
             )?,
             gain_map,
@@ -373,7 +379,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
         let gm_color = match gain_map.channels {
             1 => jpeg_encoder::ColorType::Luma,
             3 => jpeg_encoder::ColorType::Rgb,
-            _ => bail!("Unsupported channels count"),
+            other => bail!("Unsupported channels count: {other}"),
         };
 
         let gm_enc = jpeg_encoder::Encoder::new(&mut gm_jpeg, 85);
@@ -396,7 +402,12 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
     }
 
     let mut enc = jpeg_encoder::Encoder::new_file(jpeg_path, 90)?;
-    if let Some(icc) = image.icc_profile {
+
+    if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
+        let Some(icc) = image.icc_profile else {
+            bail!("Image must have an ICC profile but it's absent");
+        };
+
         enc.add_icc_profile(&icc)?;
     }
 

@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 
 use anyhow::{Ok, Result, bail};
 
-const MAGIC: &[u8; 6] = b"ALOHA1";
+const MAGIC: &[u8; 5] = b"ALOHA";
 const VERSION: u16 = 0;
 
 #[repr(u8)]
@@ -363,7 +363,7 @@ pub fn read_aloha(path: &std::path::Path) -> Result<AlohaImage> {
     let mut r = std::io::BufReader::new(file);
 
     // Reading the header
-    let mut magic = [0u8; 6];
+    let mut magic = [0u8; 5];
     r.read_exact(&mut magic)?;
     if &magic != MAGIC {
         bail!("Not an *.aloha file");
