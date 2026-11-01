@@ -12,7 +12,7 @@ use crate::error::{AlohaError, AlohaResult};
 pub enum ColorProfileDesc {
     /// No color profile is present.
     None,
-    /// The color profile is stored as cICP (Coding-Independent Code Points)
+    /// The color profile is stored as CICP (Coding-Independent Code Points)
     Cicp,
     /// The color profile is stored as raw ICC profile bytes.
     Icc,

@@ -31,7 +31,7 @@ It is designed for storage and interchange.
 An ALOHA file consists of the following sections, in order:
 
 - [Header](#4-header)
-- [cICP](#5-cicp-section) (conditional)
+- [CICP](#5-cicp-section) (conditional)
 - [ICC profile](#6-icc-profile-section) (conditional)
 - [Palette](#7-palette-section) (conditional)
 - [Metadata (JSON)](#8-metadata-section)
@@ -78,7 +78,7 @@ An 8-bit unsigned integer indicating the type of color profile information prese
 | Value | Name | Description                                            |
 |-------|------|--------------------------------------------------------|
 | 0     | None | No color profile section follows.                      |
-| 1     | Cicp | A cICP section immediately follows the header.         |
+| 1     | Cicp | A CICP section immediately follows the header.         |
 | 2     | Icc  | An ICC profile section immediately follows the header. |
 
 Values `3`—`255` are invalid and MUST be rejected.
@@ -94,7 +94,7 @@ An 8-bit unsigned integer that represents the pixel data compression algotithm b
 
 Values `2`—`255` are invalid and MUST be rejected.
 
-## 5. cICP section
+## 5. CICP section
 
 Present only when `color_profile_desc` is `1` (`Cicp`).
 
@@ -105,7 +105,7 @@ Present only when `color_profile_desc` is `1` (`Cicp`).
 | 1    | `matrix_coefficients`      | Matrix coefficients code point, `u8`.      |
 | 1    | `full_range`               | `0` = limited range, `1` = full range.     |
 
-These values corresponded to the coding-independent code points (cICP) as defined by
+These values corresponded to the coding-independent code points (CICP) as defined by
 ITU-T H.273.
 
 ## 6. ICC Profile Section

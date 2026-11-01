@@ -44,7 +44,7 @@ impl Metadata {
 /// A fully decoded in-memory representation of an `.aloha` image.
 ///
 /// An `AlohaImage` holds the pixel data along with all associated color
-/// information (ICC or cICP profile), optional palette, JSON metadata, and an
+/// information (ICC or CICP profile), optional palette, JSON metadata, and an
 /// optional gain map. Use [`write_aloha`] to encode an instance to disk and
 /// [`read_aloha`] to decode a file back into an `AlohaImage`.
 #[derive(Debug, Clone)]
@@ -59,7 +59,7 @@ pub struct AlohaImage {
     ///
     /// For indexed color types, this value must not exceed 8.
     pub bit_depth: u8,
-    /// Describes which color profile representation is used (`cICP`, `ICC` or none).
+    /// Describes which color profile representation is used (`CICP`, `ICC` or none).
     pub color_profile_desc: ColorProfileDesc,
     /// The compression algorithm applied to the pixel data.
     ///
@@ -68,7 +68,7 @@ pub struct AlohaImage {
     pub compression: u8,
     /// Whether the image contains an optional gain map.
     pub has_gain_map: bool,
-    /// The cICP color profile, required when `color_profile_desc` is [`ColorProfileDesc::Cicp`].
+    /// The CICP color profile, required when `color_profile_desc` is [`ColorProfileDesc::Cicp`].
     pub cicp: Option<zencodec::Cicp>,
     /// The raw ICC profile bytes, required when `color_profile_desc` is [`ColorProfileDesc::Icc`].
     pub icc_profile: Option<Vec<u8>>,
@@ -205,7 +205,7 @@ impl AlohaImage {
 /// Encodes an [`AlohaImage`] to the `.aloha`binary format and writes it to `path`.
 ///
 /// The function first calls [`AlohaImage::validate`] to ensure the image is
-/// internally consistent, then serializes the header, optional cICP/ICC/palette/
+/// internally consistent, then serializes the header, optional CICP/ICC/palette/
 /// metadata sections, compressed pixel data, optional gain map, and a trailing
 /// CRC32 checksum.
 ///
@@ -214,7 +214,7 @@ impl AlohaImage {
 /// Returns an error if:
 /// - Validation of `image` fails.
 /// - The file at `path` cannot be created or written to.
-/// - A required section (cICP, ICC, palette, or gain map with its metadata)
+/// - A required section (CICP, ICC, palette, or gain map with its metadata)
 ///   is missing when the corresponding flag indicates it should be present.
 /// - The compression algorithm in `image.compression` is unsupported.
 pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
@@ -236,7 +236,7 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
     buffer.push(image.compression);
     buffer.push(image.has_gain_map as u8);
 
-    // Writing the cICP section
+    // Writing the CICP section
     if matches!(image.color_profile_desc, ColorProfileDesc::Cicp) {
         let Some(cicp) = &image.cicp else {
             return Err(AlohaError::CicpNotFound);
@@ -354,7 +354,7 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
 /// Decodes an `.aloha` file from `path` into an [`AlohaImage`].
 ///
 /// The function reads the magic bytes and version, parses all sections
-/// (header, optional cICP/ICC/palette/metadata, compressed pixel data, optional
+/// (header, optional CICP/ICC/palette/metadata, compressed pixel data, optional
 /// gain map and its metadata), verifies the trailing CRC32 checksum, and finally
 /// validates the decoded image via [`AlohaImage::validate`].
 ///
@@ -413,7 +413,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
     buffer.extend(&one);
     let has_gain_map = one[0] != 0;
 
-    // Reading the cICP section
+    // Reading the CICP section
     let cicp = if matches!(color_profile_desc, ColorProfileDesc::Cicp) {
         r.read_exact(&mut one)?;
         let color_primaries = one[0];
