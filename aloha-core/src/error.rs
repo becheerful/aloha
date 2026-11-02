@@ -25,8 +25,8 @@ pub enum AlohaError {
     CicpNotFound,
     #[error("image must have an ICC profile but it's absent")]
     IccNotFound,
-    #[error("image must have a palette but it's absent")]
-    PaletteNotFound,
+    #[error("image must have a {0} palette but it's absent")]
+    PaletteNotFound(String),
     #[error("image must have a gain map metadata but it's absent")]
     GainMapMetadataNotFound,
     #[error("image must have a gain map but it's absent")]

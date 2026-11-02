@@ -19,12 +19,17 @@ mod png_conv {
             ColorType::Rgb => Rgb,
             ColorType::Rgba => Rgba,
             ColorType::Indexed => Indexed,
+            ColorType::IndexedAlpha => Indexed,
         }
     }
 
-    pub(crate) fn color_type_to_aloha(ct: &png::ColorType) -> super::ColorType {
+    pub(crate) fn color_type_to_aloha(ct: &png::ColorType, has_trns: bool) -> super::ColorType {
         use super::ColorType;
         use png::ColorType::*;
+
+        if matches!(ct, Indexed) && has_trns {
+            return ColorType::IndexedAlpha;
+        }
 
         match ct {
             Grayscale => ColorType::Grayscale,
@@ -97,7 +102,7 @@ fn convert_transfer_func(tf: u8) -> Result<ultrahdr_core::ColorTransfer> {
 
 pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
     let mut reader = png::Decoder::new(std::fs::File::open(png_path)?).read_info()?;
-    let (width, height, color_type, bit_depth, icc_profile, palette, cicp) = {
+    let (width, height, color_type, bit_depth, icc_profile, palette, transparency_palette, cicp) = {
         let info = reader.info();
         (
             info.width,
@@ -106,6 +111,7 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
             info.bit_depth,
             info.icc_profile.clone().map(Vec::from),
             info.palette.clone().map(Vec::from),
+            info.trns.clone().map(Vec::from),
             info.coding_independent_code_points,
         )
     };
@@ -176,7 +182,7 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
     let image = AlohaImage {
         width,
         height,
-        color_type: png_conv::color_type_to_aloha(&color_type),
+        color_type: png_conv::color_type_to_aloha(&color_type, transparency_palette.is_some()),
         bit_depth: match bit_depth {
             Eight => 8,
             Sixteen => 16,
@@ -194,6 +200,7 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         cicp: aloha_cicp,
         icc_profile,
         palette,
+        transparency_palette,
         metadata: Metadata::from_source(format!(
             "Converted from {}",
             png_path.to_str().unwrap_or("<NOT FOUND>")
@@ -349,6 +356,7 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 cicp: None,
                 icc_profile,
                 palette: None,
+                transparency_palette: None,
                 metadata: Metadata::from_source(format!(
                     "Converted from {}",
                     jpeg_path.to_str().unwrap_or("<NOT FOUND>")
@@ -388,6 +396,7 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
         cicp: None,
         icc_profile,
         palette: None,
+        transparency_palette: None,
         metadata: Metadata::from_source(format!(
             "Converted from {}",
             jpeg_path.to_str().unwrap_or("<NOT FOUND>")

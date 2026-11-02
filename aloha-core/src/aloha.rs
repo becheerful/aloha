@@ -57,7 +57,7 @@ pub struct AlohaImage {
     pub color_type: ColorType,
     /// The number of bits used to represent a single color sample.
     ///
-    /// For indexed color types, this value must not exceed 8.
+    /// For `Indexed` and `IndexedAlpha` color types this value must not exceed 8.
     pub bit_depth: u8,
     /// Describes which color profile representation is used (`CICP`, `ICC` or none).
     pub color_profile_desc: ColorProfileDesc,
@@ -72,8 +72,10 @@ pub struct AlohaImage {
     pub cicp: Option<zencodec::Cicp>,
     /// The raw ICC profile bytes, required when `color_profile_desc` is [`ColorProfileDesc::Icc`].
     pub icc_profile: Option<Vec<u8>>,
-    /// The color palette, required when `color_type` is an `Indexed` (4) type.
+    /// The color palette, required when `color_type` is `Indexed` (4) or `IndexedAlpha` (5).
     pub palette: Option<Vec<u8>>,
+    /// The transparency palette, required when `color_type` is `IndexedAlpha` (5).
+    pub transparency_palette: Option<Vec<u8>>,
     /// Optional JSON metadata attached to the image.
     pub metadata: Metadata,
     /// The raw (decompressed) pixel data.
@@ -89,7 +91,8 @@ impl AlohaImage {
     ///
     /// The following invariants are checked:
     ///
-    /// - `Indexed` color types have a palette and a bit depth of at most 8.
+    /// - `Indexed` and `IndexedAlpha` color types have a palette and a bit
+    ///   depth of at most 8.
     /// - Width and height are both non-zero.
     /// - The length of `data` matches `width * height * bytes_per_pixel()`.
     /// - If a gain map is present, its dimensions and data length are valid,
@@ -99,10 +102,18 @@ impl AlohaImage {
     ///
     /// Returns an [`AlohaError::ValidationError`] if any of the above checks fail.
     pub fn validate(&self) -> AlohaResult {
-        if self.color_type.is_indexed() && self.palette.is_none() {
-            return Err(AlohaError::ValidationError(
-                "the palette not found".to_owned(),
-            ));
+        if self.color_type.is_indexed() {
+            if self.palette.is_none() {
+                return Err(AlohaError::ValidationError(
+                    "the palette not found".to_owned(),
+                ));
+            }
+
+            if self.color_type.has_alpha() && self.transparency_palette.is_none() {
+                return Err(AlohaError::ValidationError(
+                    "the transparency palette not found".to_owned(),
+                ));
+            }
         }
 
         if self.color_type.is_indexed() && self.bit_depth > 8 {
@@ -224,11 +235,11 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
     let mut buffer: Vec<u8> = Vec::new();
 
     // Writing the header
-    buffer.extend(MAGIC);
-    buffer.extend(VERSION.to_le_bytes());
+    buffer.extend_from_slice(MAGIC);
+    buffer.extend_from_slice(&VERSION.to_le_bytes());
 
-    buffer.extend(image.width.to_le_bytes());
-    buffer.extend(image.height.to_le_bytes());
+    buffer.extend_from_slice(&image.width.to_le_bytes());
+    buffer.extend_from_slice(&image.height.to_le_bytes());
 
     buffer.push(image.color_type as u8);
     buffer.push(image.bit_depth);
@@ -254,24 +265,33 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
             return Err(AlohaError::IccNotFound);
         };
 
-        buffer.extend((icc.len() as u32).to_le_bytes());
-        buffer.extend(icc);
+        buffer.extend_from_slice(&(icc.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(icc);
     }
 
     // Writing the palette section
     if image.color_type.is_indexed() {
         let Some(p) = &image.palette else {
-            return Err(AlohaError::PaletteNotFound);
+            return Err(AlohaError::PaletteNotFound("color".to_owned()));
         };
 
-        buffer.extend((p.len() as u16).to_le_bytes());
-        buffer.extend(p);
+        buffer.extend_from_slice(&(p.len() as u16).to_le_bytes());
+        buffer.extend_from_slice(p);
+
+        if image.color_type.has_alpha() {
+            let Some(tp) = &image.transparency_palette else {
+                return Err(AlohaError::PaletteNotFound("transparency".to_owned()));
+            };
+
+            buffer.push(tp.len() as u8);
+            buffer.extend_from_slice(tp);
+        }
     }
 
     // Writing the metadata section
     let meta_json = serde_json::to_vec(&image.metadata)?;
-    buffer.extend((meta_json.len() as u32).to_le_bytes());
-    buffer.extend(meta_json);
+    buffer.extend_from_slice(&(meta_json.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(&meta_json);
 
     // Writing the compressed pixel data section
     let compressed = match image.compression {
@@ -292,8 +312,8 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
         other => return Err(AlohaError::InvalidCompressionAlgorithm(other)),
     };
 
-    buffer.extend((compressed.len() as u64).to_le_bytes());
-    buffer.extend(compressed);
+    buffer.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
+    buffer.extend_from_slice(&compressed);
 
     if image.has_gain_map {
         // Writing the gain map metadata section
@@ -302,15 +322,15 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
         };
 
         for i in 0..3 {
-            buffer.extend(gain_map_params.gain_map_max[i].to_le_bytes());
-            buffer.extend(gain_map_params.gain_map_min[i].to_le_bytes());
-            buffer.extend(gain_map_params.gamma[i].to_le_bytes());
-            buffer.extend(gain_map_params.base_offset[i].to_le_bytes());
-            buffer.extend(gain_map_params.alternate_offset[i].to_le_bytes());
+            buffer.extend_from_slice(&gain_map_params.gain_map_max[i].to_le_bytes());
+            buffer.extend_from_slice(&gain_map_params.gain_map_min[i].to_le_bytes());
+            buffer.extend_from_slice(&gain_map_params.gamma[i].to_le_bytes());
+            buffer.extend_from_slice(&gain_map_params.base_offset[i].to_le_bytes());
+            buffer.extend_from_slice(&gain_map_params.alternate_offset[i].to_le_bytes());
         }
 
-        buffer.extend(gain_map_params.base_hdr_headroom.to_le_bytes());
-        buffer.extend(gain_map_params.alternate_hdr_headroom.to_le_bytes());
+        buffer.extend_from_slice(&gain_map_params.base_hdr_headroom.to_le_bytes());
+        buffer.extend_from_slice(&gain_map_params.alternate_hdr_headroom.to_le_bytes());
         buffer.push(gain_map_params.use_base_color_space as u8);
         buffer.push(gain_map_params.backward_direction as u8);
 
@@ -331,17 +351,17 @@ pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
         enc.write_all(&filtered)?;
         let compressed = enc.finish()?;
 
-        buffer.extend(gain_map.width.to_le_bytes());
-        buffer.extend(gain_map.height.to_le_bytes());
+        buffer.extend_from_slice(&gain_map.width.to_le_bytes());
+        buffer.extend_from_slice(&gain_map.height.to_le_bytes());
         buffer.push(gain_map.channels);
 
-        buffer.extend((compressed.len() as u64).to_le_bytes());
-        buffer.extend(compressed);
+        buffer.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
+        buffer.extend_from_slice(&compressed);
     }
 
     // Writing the CRC32 section
     let checksum = crc32fast::hash(&buffer);
-    buffer.extend(checksum.to_le_bytes());
+    buffer.extend_from_slice(&checksum.to_le_bytes());
 
     // Writing the buffer to a file
     let mut w = std::io::BufWriter::new(file);
@@ -378,7 +398,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
     if &magic != MAGIC {
         return Err(AlohaError::DecodingError("not an *.aloha file".to_owned()));
     }
-    buffer.extend(magic);
+    buffer.extend_from_slice(&magic);
 
     let version = read_u16(&mut r, &mut buffer)?;
     if version > VERSION {
@@ -402,7 +422,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
     buffer.push(bit_depth);
 
     r.read_exact(&mut one)?;
-    buffer.extend(&one);
+    buffer.push(one[0]);
     let color_profile_desc = ColorProfileDesc::try_from(one[0])?;
 
     r.read_exact(&mut one)?;
@@ -410,7 +430,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
     buffer.push(compression);
 
     r.read_exact(&mut one)?;
-    buffer.extend(&one);
+    buffer.push(one[0]);
     let has_gain_map = one[0] != 0;
 
     // Reading the CICP section
@@ -428,7 +448,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
         buffer.push(matrix_coefficients);
 
         r.read_exact(&mut one)?;
-        buffer.extend(&one);
+        buffer.push(one[0]);
         let full_range = one[0] != 0;
 
         Some(zencodec::Cicp::new(
@@ -447,7 +467,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
 
         let mut icc_bytes = vec![0u8; icc_profile_len as usize];
         r.read_exact(&mut icc_bytes)?;
-        buffer.extend(&icc_bytes);
+        buffer.extend_from_slice(&icc_bytes);
 
         Some(icc_bytes)
     } else {
@@ -455,17 +475,29 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
     };
 
     // Reading the palette section
-    let palette = if color_type.is_indexed() {
+    let mut palette = None;
+    let mut transparency_palette = None;
+    if color_type.is_indexed() {
         let palette_len = read_u16(&mut r, &mut buffer)?;
 
         let mut palette_bytes = vec![0u8; palette_len as usize];
         r.read_exact(&mut palette_bytes)?;
-        buffer.extend(&palette_bytes);
+        buffer.extend_from_slice(&palette_bytes);
 
-        Some(palette_bytes)
-    } else {
-        None
-    };
+        palette = Some(palette_bytes);
+
+        if color_type.has_alpha() {
+            r.read_exact(&mut one)?;
+            let tp_len = one[0];
+            buffer.push(tp_len);
+
+            let mut tp_bytes = vec![0u8; tp_len as usize];
+            r.read_exact(&mut tp_bytes)?;
+            buffer.extend_from_slice(&tp_bytes);
+
+            transparency_palette = Some(tp_bytes);
+        }
+    }
 
     // Reading the metadata section
     let meta_len = read_u32(&mut r, &mut buffer)?;
@@ -481,7 +513,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
 
     let mut pixels_bytes = vec![0u8; data_len as usize];
     r.read_exact(&mut pixels_bytes)?;
-    buffer.extend(&pixels_bytes);
+    buffer.extend_from_slice(&pixels_bytes);
 
     let data = match compression {
         0 => pixels_bytes,
@@ -522,15 +554,13 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
         let base_hdr_headroom = read_f64(&mut r, &mut buffer)?;
         let alternate_hdr_headroom = read_f64(&mut r, &mut buffer)?;
 
-        let mut b = [0u8];
+        r.read_exact(&mut one)?;
+        buffer.push(one[0]);
+        let use_base_color_space = one[0] != 0;
 
-        r.read_exact(&mut b)?;
-        buffer.extend(&b);
-        let use_base_color_space = b[0] != 0;
-
-        r.read_exact(&mut b)?;
-        buffer.extend(&b);
-        let backward_direction = b[0] != 0;
+        r.read_exact(&mut one)?;
+        buffer.push(one[0]);
+        let backward_direction = one[0] != 0;
 
         // this mess is due to the fact that the `GainMapMetadata` is non-exhaustive
         let mut gmmd = ultrahdr_core::GainMapMetadata::default();
@@ -548,14 +578,14 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
         let width = read_u32(&mut r, &mut buffer)?;
         let height = read_u32(&mut r, &mut buffer)?;
 
-        r.read_exact(&mut b)?;
-        let channels = b[0];
+        r.read_exact(&mut one)?;
+        let channels = one[0];
         buffer.push(channels);
 
         let gain_map_len = read_u64(&mut r, &mut buffer)?;
         let mut gain_map_bytes = vec![0u8; gain_map_len as usize];
         r.read_exact(&mut gain_map_bytes)?;
-        buffer.extend(&gain_map_bytes);
+        buffer.extend_from_slice(&gain_map_bytes);
 
         let mut dec = flate2::read::ZlibDecoder::new(gain_map_bytes.as_slice());
         let mut filtered = Vec::new();
@@ -601,6 +631,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
         cicp,
         icc_profile,
         palette,
+        transparency_palette,
         metadata,
         data,
         gain_map_metadata,
@@ -615,7 +646,7 @@ pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
 ///
 /// For each channel, the first sample is stored as-is, and every subsequent
 /// sample is replaced by the wrapping difference from the previous sample in the
-/// same channel. `Indexed` color type is returned unchanged.
+/// same channel. `Indexed` and `IndexedAlpha` color types are returned unchanged.
 ///
 /// # Errors
 ///
@@ -655,8 +686,8 @@ fn delta_encode(
 /// Reverses the delta encoding applied by [`delta_decode`].
 ///
 /// Each sample is reconstructed by wrapping-adding the delta value to the
-/// previous sample in the same channel. `Indexed` color types are returned
-/// unchanged.
+/// previous sample in the same channel. `Indexed` and `IndexedAlpha` color types
+/// are returned unchanged.
 ///
 /// # Errors
 ///
@@ -696,27 +727,27 @@ fn delta_decode(
 fn read_u16(r: &mut impl Read, buf: &mut Vec<u8>) -> AlohaResult<u16> {
     let mut b = [0u8; 2];
     r.read_exact(&mut b)?;
-    buf.extend(b);
+    buf.extend_from_slice(&b);
     Ok(u16::from_le_bytes(b))
 }
 
 fn read_u32(r: &mut impl Read, buf: &mut Vec<u8>) -> AlohaResult<u32> {
     let mut b = [0u8; 4];
     r.read_exact(&mut b)?;
-    buf.extend(b);
+    buf.extend_from_slice(&b);
     Ok(u32::from_le_bytes(b))
 }
 
 fn read_u64(r: &mut impl Read, buf: &mut Vec<u8>) -> AlohaResult<u64> {
     let mut b = [0u8; 8];
     r.read_exact(&mut b)?;
-    buf.extend(b);
+    buf.extend_from_slice(&b);
     Ok(u64::from_le_bytes(b))
 }
 
 fn read_f64(r: &mut impl Read, buf: &mut Vec<u8>) -> AlohaResult<f64> {
     let mut b = [0u8; 8];
     r.read_exact(&mut b)?;
-    buf.extend(b);
+    buf.extend_from_slice(&b);
     Ok(f64::from_le_bytes(b))
 }

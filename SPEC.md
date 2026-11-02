@@ -2,7 +2,7 @@
 
 **Format version:** 0 \
 **Status:** Draft \
-**Last updated:** 2026-10-31
+**Last updated:** 2026-11-02
 
 ## 1. Overview
 
@@ -34,11 +34,12 @@ An ALOHA file consists of the following sections, in order:
 - [CICP](#5-cicp-section) (conditional)
 - [ICC profile](#6-icc-profile-section) (conditional)
 - [Palette](#7-palette-section) (conditional)
-- [Metadata (JSON)](#8-metadata-section)
-- [Compressed pixel data](#9-pixel-data-section)
-- [Gain map metadata](#10-gain-map-metadata-section) (conditional)
-- [Gain map data](#11-gain-map-section) (conditional)
-- [CRC32](#12-crc32-section)
+- [Transparency Palette](#8-transparency-palette-section) (conditional)
+- [Metadata (JSON)](#9-metadata-section)
+- [Compressed pixel data](#10-pixel-data-section)
+- [Gain map metadata](#11-gain-map-metadata-section) (conditional)
+- [Gain map data](#12-gain-map-section) (conditional)
+- [CRC32](#13-crc32-section)
 
 All sections are contiguous. No padding is inserted. Conditional sections are present
 only if the corresponding flags or descriptros indicate so.
@@ -61,15 +62,16 @@ only if the corresponding flags or descriptros indicate so.
 
 An 8-bit unsigned integer that represents the image's color model.
 
-| Value | Name           | Channels | Description                                |
-|-------|----------------|----------|--------------------------------------------|
-| 0     | Grayscale      | 1        | Single channel, bit depth as declared.     |
-| 1     | GrayscaleAlpha | 2        | Gray + alpha.                              |
-| 2     | RGB            | 3        | Red, green, blue.                          |
-| 3     | RGBA           | 4        | Red, green, blue, alpha.                   |
-| 4     | Indexed        | 1        | Palette index; palette selection required. |
+| Value | Name           | Channels | Description                                                            |
+|-------|----------------|----------|------------------------------------------------------------------------|
+| 0     | Grayscale      | 1        | Single channel, shades of gray.                                        |
+| 1     | GrayscaleAlpha | 2        | Gray + alpha.                                                          |
+| 2     | Rgb            | 3        | Red, green, blue.                                                      |
+| 3     | Rgba           | 4        | Red, green, blue, alpha.                                               |
+| 4     | Indexed        | 1        | Palette index; palette section required.                               |
+| 5     | IndexedAlpha   | 2        | Index in palettes; palette and transparency palette sections required. |
 
-Values `5`—`255` are invalid and MUST be rejected.
+Values `6`—`255` are invalid and MUST be rejected.
 
 ### 4.2 Color Profile Descriptor
 
@@ -119,7 +121,8 @@ Present only when `color_profile_desc` is `2` (`Icc`).
 
 ## 7. Palette Section
 
-Required when `color_type` is `4` (`Indexed`). The palette section MUST be absent otherwise.
+Required when `color_type` is `4` (`Indexed`) or `5` (`IndexedAlpha`). The palette section MUST
+be absent otherwise.
 
 | Size | Field         | Description                              |
 |------|---------------|------------------------------------------|
@@ -131,7 +134,22 @@ The number of entries is not explicitly derived here; it is determined by the co
 context (e.g., PNG palette semantics). For an ALOHA file generated from an indexed PNG, `palette_len`
 equals the byte length of the PNG palette.
 
-## 8. Metadata Section
+## 8. Transparency Palette Section
+
+Required when `color_type` is `5` (`IndexedAlpha`). The transparent palette section MUST be absent
+otherwise.
+
+| Size | Field                  | Description                                      |
+|------|------------------------|--------------------------------------------------|
+| 1    | `tp_len`               | Length of transparency palette bytes, `u8`.      |
+| *    | `transparency_palette` | `tp_len` bytes of raw transparency palette data. |
+
+The transparency palette data is stored as raw bytes as provided by the source (e.g., from a PNG
+indexed image). The number of entries is not explicitly derived here; it is determined by the consumer
+based on the context (e.g., PNG tRNS chunk semantics). For an ALOHA file generated from an indexed PNG,
+`tp_len` equals the byte length of the PNG tRNS chunk.
+
+## 9. Metadata Section
 
 | Size | Field      | Description                     |
 |------|------------|---------------------------------|
@@ -149,9 +167,9 @@ Additional keys MAY be present. Decoders MUST ignore unknown keys rather than fa
 Fields with a value of `None` are not written. If metadata is empty, `meta_len` is `0`
 and the metadata bytes are absent.
 
-## 9. Pixel Data Section
+## 10. Pixel Data Section
 
-### 9.1 Representation
+### 10.1 Representation
 
 Samples are stored in **pixel-interleaved** order: for a pixel at `(x, y)` and channel `c`,
 the sample index is
@@ -172,7 +190,7 @@ Each sample is stored as an unsigned integer of `bit_depth` bits (`8` or `16`):
 A sample's value is in the range `[0, 2^bit_depth - 1]`; the mask `2^bit_depth - 1` is
 reffered to below as `sample_mask`.
 
-### 9.2 Delta coding
+### 10.2 Delta coding
 
 Delta coding is applied when `compression` is `1` **and** `color_type` is not `4` (`Indexed`).
 For `Indexed` images the pixel buffer is stored unchanged, with no delta coding, regardless of
@@ -226,7 +244,7 @@ in the algorithm — it falls out of the per-row reset.
 If `compression` is `0`, or if `color_type` is `4` (`Indexed`), no delta coding is applied and
 `out` equals `data` for the pixel section.
 
-### 9.3 Compression
+### 10.3 Compression
 
 When `compression` is `1`, the (possibly delta-coded) pixel buffer is compressed with DEFLATE
 as produced by zlib, i.e. the same algorthm exposed by `flate2`'s `ZlibEncoder` / `ZlibDecoder`
@@ -234,7 +252,7 @@ with `Compression::best()`. No preset dictionary is used. The zlib header MUST b
 
 When `compression` is `0`, the pixel data is stored raw.
 
-## 10. Gain Map Metadata Section
+## 11. Gain Map Metadata Section
 
 Preset only when `has_gain_map` is `1`. The gain map metadata section precedes the gain map
 pixel data.
@@ -257,7 +275,7 @@ and boolean flags `use_base_color_space` and `backward_direction`. All floating-
 
 These fields correspond to the gain map metadata defined by the Ultra HDR specification.
 
-## 11. Gain Map Section
+## 12. Gain Map Section
 
 Present only when `has_gain_map` is `1`. The gain map is a separate image with the following layout:
 
@@ -271,7 +289,7 @@ Present only when `has_gain_map` is `1`. The gain map is a separate image with t
 
 The gain map pixel data is **always** 8-bit per channel and is processed as follows:
 
-1. Delta encoding is applied per row (same algorithm as in [9.2](#92-delta-coding)), regardless of the
+1. Delta encoding is applied per row (same algorithm as in [10.2](#102-delta-coding)), regardless of the
 main image's `compression` value.
 
 2. The delta-coded buffer is compressed with zlib (`flate2::Compression::best()`).
@@ -279,7 +297,7 @@ main image's `compression` value.
 During decoding, the compressed data is first decompressed with zlib, then delta-decoded using the gain
 map's own `width`, `height`, and channel count (width `bit_depth` = `8`).
 
-## 12. CRC32 Section
+## 13. CRC32 Section
 
 The final 4 bytes of the file are the CRC32 checksum of all the data in the file (without the
 checksum itself), computed with the `crc32fast` crate.

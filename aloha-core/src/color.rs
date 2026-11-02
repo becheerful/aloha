@@ -45,17 +45,19 @@ pub enum ColorType {
     Rgba,
     /// Each sample is an index into a color palette.
     Indexed,
+    /// Each sample is an index into a color palette and a transparency palette.
+    IndexedAlpha,
 }
 
 impl ColorType {
     /// Creates a `ColorType` from a raw channel count.
     ///
-    /// This is the inverse of [`ColorType::channels`] for non-`Indexed` types.
+    /// This is the inverse of [`ColorType::channels`] for non-indexed types.
     ///
     /// # Errors
     ///
     /// Returns [`AlohaError::InvalidChannelsCount`] if `channels` is 0 or greater than 4,
-    /// or if the count does not map to a supported non-`Indexed` layout.
+    /// or if the count does not map to a supported non-indexed layout.
     pub fn from_channels_count(channels: usize) -> AlohaResult<Self> {
         Ok(match channels {
             1 => Self::Grayscale,
@@ -70,14 +72,20 @@ impl ColorType {
     pub fn channels(&self) -> usize {
         match self {
             Self::Grayscale | Self::Indexed => 1,
-            Self::GrayscaleAlpha => 2,
+            Self::GrayscaleAlpha | Self::IndexedAlpha => 2,
             Self::Rgb => 3,
             Self::Rgba => 4,
         }
     }
 
+    /// Checks whether this color type is `Indexed` or `IndexedAlpha`.
     pub fn is_indexed(&self) -> bool {
-        matches!(self, Self::Indexed)
+        matches!(self, Self::Indexed | Self::IndexedAlpha)
+    }
+
+    /// Checks whether this color type has an alpha channel.
+    pub fn has_alpha(&self) -> bool {
+        matches!(self, Self::GrayscaleAlpha | Self::Rgba | Self::IndexedAlpha)
     }
 }
 
@@ -91,6 +99,7 @@ impl TryFrom<u8> for ColorType {
             2 => Self::Rgb,
             3 => Self::Rgba,
             4 => Self::Indexed,
+            5 => Self::IndexedAlpha,
             _ => return Err(AlohaError::InvalidColorType(value)),
         })
     }

@@ -17,6 +17,9 @@ pub fn aloha_to_rgba8(image: &AlohaImage) -> Result<Vec<u8>, String> {
             return Err("Indexed image without palette".to_owned());
         };
 
+        let has_alpha = image.color_type.has_alpha();
+        let tp = image.transparency_palette.as_ref();
+
         for i in 0..pixels {
             let index = image.data[i] as usize;
             let off = index * 3;
@@ -25,7 +28,20 @@ pub fn aloha_to_rgba8(image: &AlohaImage) -> Result<Vec<u8>, String> {
                 return Err(format!("Palette index out of bounds: {index}"));
             }
 
-            out.extend_from_slice(&[palette[off], palette[off + 1], palette[off + 2], 255]);
+            if has_alpha {
+                // `.unwrap()` is safe here if image validation passed
+                if index > tp.unwrap().len() {
+                    return Err(format!("Transparency palette index out of bounds: {index}"));
+                }
+            }
+
+            out.extend_from_slice(&[
+                palette[off],
+                palette[off + 1],
+                palette[off + 2],
+                // `.unwrap()` is safe here if image validation passed
+                if has_alpha { tp.unwrap()[off + 3] } else { 255 },
+            ]);
         }
 
         return Ok(out);
@@ -75,7 +91,7 @@ pub fn aloha_to_rgba8(image: &AlohaImage) -> Result<Vec<u8>, String> {
                 ]);
             }
 
-            Indexed => unreachable!(),
+            Indexed | IndexedAlpha => unreachable!(),
         }
     }
 
