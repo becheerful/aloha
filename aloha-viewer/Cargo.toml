@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 aloha-core = { path = "../aloha-core" }
-eframe = "0.37"
+aloha-convert = { path = "../aloha-convert" }
+eframe = "0.36"
+modern-egui = "0.1"
 rfd = "0.17"
 rust-i18n = "4.2"

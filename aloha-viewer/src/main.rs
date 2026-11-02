@@ -1,5 +1,7 @@
 rust_i18n::i18n!("locales");
 
+use std::path::Path;
+
 use eframe::egui::{self, Ui};
 use rust_i18n::t;
 
@@ -10,20 +12,25 @@ struct AlohaViewer {
     texture: Option<egui::TextureHandle>,
     error: Option<String>,
     zoom: f32,
+    pending_input: Option<std::path::PathBuf>,
 }
 
 impl AlohaViewer {
-    pub fn new(_cc: &eframe::CreationContext) -> Self {
+    pub fn new(cc: &eframe::CreationContext) -> Self {
+        cc.egui_ctx.set_theme(egui::Theme::Dark);
+        modern_egui::theme::apply(&cc.egui_ctx);
+
         Self {
             locale: "en",
             texture: None,
             error: None,
             zoom: -1.0,
+            pending_input: None,
         }
     }
 
-    fn load(&mut self, ui: &mut Ui, path: &std::path::PathBuf) {
-        match aloha_core::read_aloha(path.as_path()) {
+    fn load(&mut self, ui: &mut Ui, path: &Path) {
+        match aloha_core::read_aloha(path) {
             Ok(image) => match utils::aloha_to_rgba8(&image) {
                 Ok(data) => {
                     let color = egui::ColorImage::from_rgba_unmultiplied(
@@ -56,6 +63,73 @@ impl AlohaViewer {
             }
         }
     }
+
+    fn convert_to(&mut self, ui: &mut Ui, path: &Path) {
+        let default_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image")
+            .to_string()
+            + ".aloha";
+
+        let Some(out) = rfd::FileDialog::new()
+            .add_filter(t!("aloha-images", locale = self.locale), &["aloha"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+
+        match path.extension().and_then(|s| s.to_str()).unwrap() {
+            "png" => {
+                let _ = aloha_convert::png_to_aloha(&path, &out)
+                    .map_err(|e| self.error = Some(e.to_string()));
+            }
+
+            "jpg" | "jpeg" => {
+                let _ = aloha_convert::jpeg_to_aloha(&path, &out)
+                    .map_err(|e| self.error = Some(e.to_string()));
+            }
+
+            _ => unreachable!(),
+        };
+
+        self.load(ui, &out);
+    }
+
+    fn convert_from(&mut self, ui: &mut Ui, path: &Path, ext: &str) {
+        self.load(ui, path);
+
+        let default_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image")
+            .to_string()
+            + "."
+            + ext;
+
+        let Some(out) = rfd::FileDialog::new()
+            .add_filter(t!("images", locale = self.locale), &[ext])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+
+        match ext {
+            "png" => {
+                let _ = aloha_convert::aloha_to_png(&path, &out)
+                    .map_err(|e| self.error = Some(e.to_string()));
+            }
+
+            "jpg" | "jpeg" => {
+                let _ = aloha_convert::aloha_to_jpeg(&path, &out)
+                    .map_err(|e| self.error = Some(e.to_string()));
+            }
+
+            _ => unreachable!(),
+        };
+    }
 }
 
 impl eframe::App for AlohaViewer {
@@ -65,6 +139,27 @@ impl eframe::App for AlohaViewer {
                 if ui.button(t!("open-file", locale = self.locale)).clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                         self.load(ui, &path);
+                    }
+                }
+
+                if ui.button(t!("convert-in", locale = self.locale)).clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(t!("images", locale = self.locale), &["png", "jpg", "jpeg"])
+                        .pick_file()
+                    {
+                        self.convert_to(ui, &path);
+                    }
+                }
+
+                if ui
+                    .button(t!("convert-from", locale = self.locale))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(t!("aloha-images", locale = self.locale), &["aloha"])
+                        .pick_file()
+                    {
+                        self.pending_input = Some(path);
                     }
                 }
 
@@ -120,6 +215,43 @@ impl eframe::App for AlohaViewer {
                 ui.colored_label(egui::Color32::RED, error);
             }
         });
+
+        if let Some(path) = self.pending_input.clone() {
+            let mut close = false;
+            egui::Window::new(t!("select-format", locale = self.locale))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui, |ui| {
+                    ui.label(t!(
+                        "convert-in-window",
+                        locale = self.locale,
+                        name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
+                    ));
+
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("PNG").clicked() {
+                            self.convert_from(ui, &path, "png");
+                            close = true;
+                        }
+
+                        if ui.button("JPEG").clicked() {
+                            self.convert_from(ui, &path, "jpg");
+                            close = true;
+                        }
+
+                        if ui.button(t!("cancel", locale = self.locale)).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if close {
+                self.pending_input = None;
+            }
+        }
     }
 }
 
