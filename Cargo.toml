@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["aloha-core", "aloha-convert"]
+members = [
+    "aloha-core",
+    "aloha-convert",
+    "aloha-viewer",
+]
 
 [workspace.package]
 edition = "2024"
