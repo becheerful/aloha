@@ -7,3 +7,4 @@ edition.workspace = true
 aloha-core = { path = "../aloha-core" }
 eframe = "0.37"
 rfd = "0.17"
+rust-i18n = "4.2"

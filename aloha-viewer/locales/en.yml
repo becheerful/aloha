@@ -1,0 +1,6 @@
+language: "Language"
+file: "File"
+open-file: "Open File"
+exit: "Exit"
+scale: "Scale:"
+fit: "Fit"

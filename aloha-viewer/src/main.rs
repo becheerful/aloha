@@ -1,8 +1,12 @@
+rust_i18n::i18n!("locales");
+
 use eframe::egui::{self, Ui};
+use rust_i18n::t;
 
 mod utils;
 
 struct AlohaViewer {
+    locale: &'static str,
     texture: Option<egui::TextureHandle>,
     error: Option<String>,
     zoom: f32,
@@ -11,6 +15,7 @@ struct AlohaViewer {
 impl AlohaViewer {
     pub fn new(_cc: &eframe::CreationContext) -> Self {
         Self {
+            locale: "en",
             texture: None,
             error: None,
             zoom: -1.0,
@@ -56,14 +61,14 @@ impl AlohaViewer {
 impl eframe::App for AlohaViewer {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         egui::MenuBar::default().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("Open File").clicked() {
+            ui.menu_button(t!("file", locale = self.locale), |ui| {
+                if ui.button(t!("open-file", locale = self.locale)).clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                         self.load(ui, &path);
                     }
                 }
 
-                if ui.button("Exit").clicked() {
+                if ui.button(t!("exit", locale = self.locale)).clicked() {
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -71,16 +76,26 @@ impl eframe::App for AlohaViewer {
                 }
             });
 
+            ui.menu_button(t!("language", locale = self.locale), |ui| {
+                if ui.button("English").clicked() {
+                    self.locale = "en";
+                }
+
+                if ui.button("Русский").clicked() {
+                    self.locale = "ru";
+                }
+            });
+
             if self.texture.is_some() {
                 ui.separator();
-                ui.label("Scale:");
+                ui.label(t!("scale", locale = self.locale));
                 ui.add(egui::Slider::new(&mut self.zoom, 0.1..=16.0).logarithmic(true));
 
                 if ui.button("1:1").clicked() {
                     self.zoom = 1.0;
                 }
 
-                if ui.button("Fit").clicked() {
+                if ui.button(t!("fit", locale = self.locale)).clicked() {
                     self.zoom = -1.0;
                 }
             }
