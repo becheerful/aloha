@@ -1,4 +1,4 @@
-mod aloha;
+pub mod aloha;
 pub mod color;
 pub mod error;
 
