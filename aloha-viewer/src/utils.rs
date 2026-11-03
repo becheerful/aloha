@@ -1,10 +1,8 @@
-use aloha_core::AlohaImage;
-
 fn to8(v: u16, bps: usize) -> u8 {
     if bps == 1 { v as u8 } else { (v / 256) as u8 }
 }
 
-pub fn aloha_to_rgba8(image: &AlohaImage) -> Result<Vec<u8>, String> {
+pub fn aloha_to_rgba8(image: &aloha_core::AlohaImage) -> Result<Vec<u8>, String> {
     let w = image.width as usize;
     let h = image.height as usize;
     let pixels = w * h;
