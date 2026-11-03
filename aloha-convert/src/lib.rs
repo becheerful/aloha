@@ -411,7 +411,10 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
 }
 
 pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
-    let image = read_aloha(aloha_path)?;
+    let mut image = read_aloha(aloha_path)?;
+    image.discard_alpha();
+
+    let color_type = jpeg_conv::color_type_from_aloha(&image.color_type)?;
 
     if image.has_gain_map {
         let Some(gain_map) = &image.gain_map else {
@@ -432,7 +435,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
             &image.data,
             image.width as u16,
             image.height as u16,
-            jpeg_conv::color_type_from_aloha(&image.color_type)?,
+            color_type,
         )?;
 
         let mut gm_jpeg = Vec::new();
@@ -464,18 +467,18 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
     let mut enc = jpeg_encoder::Encoder::new_file(jpeg_path, 90)?;
 
     if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
-        let Some(icc) = image.icc_profile else {
+        let Some(icc) = &image.icc_profile else {
             bail!("Image must have an ICC profile but it's absent");
         };
 
-        enc.add_icc_profile(&icc)?;
+        enc.add_icc_profile(icc)?;
     }
 
     enc.encode(
         &image.data,
         image.width as u16,
         image.height as u16,
-        jpeg_conv::color_type_from_aloha(&image.color_type)?,
+        color_type,
     )?;
 
     Ok(())

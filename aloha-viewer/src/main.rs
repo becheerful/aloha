@@ -9,9 +9,12 @@ mod utils;
 
 struct AlohaViewer {
     locale: &'static str,
+    file_name: String,
+    expanded: bool,
     texture: Option<egui::TextureHandle>,
     error: Option<String>,
     zoom: f32,
+    auto_zoom: bool,
     pending_input: Option<std::path::PathBuf>,
 }
 
@@ -22,9 +25,12 @@ impl AlohaViewer {
 
         Self {
             locale: "en",
+            file_name: "File not selected".to_owned(),
+            expanded: false,
             texture: None,
             error: None,
-            zoom: -1.0,
+            zoom: 1.0,
+            auto_zoom: true,
             pending_input: None,
         }
     }
@@ -51,6 +57,13 @@ impl AlohaViewer {
                             ));
                         }
                     }
+
+                    self.file_name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?")
+                        .to_owned();
+                    self.expanded = true;
                 }
 
                 Err(e) => {
@@ -137,7 +150,10 @@ impl eframe::App for AlohaViewer {
         egui::MenuBar::default().ui(ui, |ui| {
             ui.menu_button(t!("file", locale = self.locale), |ui| {
                 if ui.button(t!("open-file", locale = self.locale)).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(t!("aloha-images", locale = self.locale), &["aloha"])
+                        .pick_file()
+                    {
                         self.load(ui, &path);
                     }
                 }
@@ -184,16 +200,27 @@ impl eframe::App for AlohaViewer {
             if self.texture.is_some() {
                 ui.separator();
                 ui.label(t!("scale", locale = self.locale));
-                ui.add(egui::Slider::new(&mut self.zoom, 0.1..=16.0).logarithmic(true));
+                if ui
+                    .add(egui::Slider::new(&mut self.zoom, 0.1..=16.0).logarithmic(true))
+                    .changed()
+                {
+                    self.auto_zoom = false;
+                }
 
                 if ui.button("1:1").clicked() {
                     self.zoom = 1.0;
+                    self.auto_zoom = false;
                 }
 
-                if ui.button(t!("fit", locale = self.locale)).clicked() {
-                    self.zoom = -1.0;
-                }
+                ui.checkbox(&mut self.auto_zoom, t!("fit", locale = self.locale));
             }
+        });
+
+        let mut top = self.expanded;
+        egui::Panel::top("top_pannel").show_collapsible(ui, &mut top, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(&self.file_name);
+            });
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -201,13 +228,15 @@ impl eframe::App for AlohaViewer {
                 let avail = ui.available_size();
                 let size = texture.size_vec2();
 
-                let scale = if self.zoom == -1.0 {
+                let scale = if self.auto_zoom {
                     (avail.x / size.x).min(avail.y / size.y)
                 } else {
                     self.zoom
                 };
 
-                ui.add(egui::Image::new(texture).fit_to_exact_size(size * scale));
+                ui.centered_and_justified(|ui| {
+                    ui.add(egui::Image::new(texture).fit_to_exact_size(size * scale));
+                });
                 self.zoom = scale;
             }
 

@@ -214,6 +214,40 @@ impl AlohaImage {
             _ => return Err(AlohaError::InvalidBytesPerSample(bytes_per_sample)),
         })
     }
+
+    pub fn discard_alpha(&mut self) {
+        match self.color_type {
+            ColorType::GrayscaleAlpha => {
+                self.data = self.data.chunks_exact(2).map(|s| s[0]).collect();
+                self.color_type = ColorType::Grayscale;
+            }
+
+            ColorType::Rgba => {
+                if self.bit_depth == 8 {
+                    self.data = self
+                        .data
+                        .chunks_exact(4)
+                        .flat_map(|s| s[..3].to_owned())
+                        .collect();
+                } else {
+                    self.data = self
+                        .data
+                        .chunks_exact(8)
+                        .flat_map(|s| s[..6].to_owned())
+                        .collect();
+                }
+
+                self.color_type = ColorType::Rgb;
+            }
+
+            ColorType::IndexedAlpha => {
+                self.data = self.data.chunks_exact(2).map(|s| s[0]).collect();
+                self.color_type = ColorType::Indexed;
+            }
+
+            _ => {}
+        }
+    }
 }
 
 /// Encodes an [`AlohaImage`] to the `.aloha`binary format and writes it to `path`.

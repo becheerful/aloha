@@ -1,6 +1,6 @@
 [package]
 name = "aloha-convert"
-version = "0.6.0"
+version = "0.6.1"
 edition.workspace = true
 description = "Conversion between ALOHA, PNG, and JPEG"
 
