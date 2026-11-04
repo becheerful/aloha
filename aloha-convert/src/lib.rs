@@ -1,11 +1,14 @@
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter},
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 
 use aloha_core::{
     AlohaImage, Metadata,
     color::{ColorProfileDesc, ColorType},
-    read_aloha, write_aloha,
 };
 
 mod png_conv {
@@ -101,7 +104,7 @@ fn convert_transfer_func(tf: u8) -> Result<ultrahdr_core::ColorTransfer> {
 }
 
 pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
-    let mut reader = png::Decoder::new(std::fs::File::open(png_path)?).read_info()?;
+    let mut reader = png::Decoder::new(File::open(png_path)?).read_info()?;
     let (width, height, color_type, bit_depth, icc_profile, palette, transparency_palette, cicp) = {
         let info = reader.info();
         (
@@ -179,43 +182,35 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         .unzip();
     }
 
-    let image = AlohaImage {
+    let image = AlohaImage::new(
         width,
         height,
-        color_type: png_conv::color_type_to_aloha(&color_type, transparency_palette.is_some()),
-        bit_depth: match bit_depth {
+        png_conv::color_type_to_aloha(&color_type, transparency_palette.is_some()),
+        match bit_depth {
             Eight => 8,
             Sixteen => 16,
             _ => bail!("Unsupported bit depth: {}", bit_depth as u8),
         },
-        color_profile_desc: if aloha_cicp.is_some() {
-            ColorProfileDesc::Cicp
-        } else if icc_profile.is_some() {
-            ColorProfileDesc::Icc
-        } else {
-            ColorProfileDesc::None
-        },
-        compression: 1,
-        has_gain_map,
-        cicp: aloha_cicp,
+        1,
+        aloha_cicp,
         icc_profile,
         palette,
         transparency_palette,
-        metadata: Metadata::from_source(format!(
+        Metadata::from_source(format!(
             "Converted from {}",
             png_path.to_str().unwrap_or("<NOT FOUND>")
         )),
         data,
         gain_map_metadata,
         gain_map,
-    };
+    )?;
 
-    write_aloha(aloha_path, &image)?;
+    image.write_to(BufWriter::new(File::create(aloha_path)?))?;
     Ok(())
 }
 
 pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
-    let image = read_aloha(aloha_path)?;
+    let image = AlohaImage::read_from(BufReader::new(File::open(aloha_path)?))?;
 
     let mut info = png::Info::with_size(image.width, image.height);
 
@@ -290,11 +285,8 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         None
     };
 
-    let mut writer = png::Encoder::with_info(
-        std::io::BufWriter::new(std::fs::File::create(png_path)?),
-        info,
-    )?
-    .write_header()?;
+    let mut writer =
+        png::Encoder::with_info(BufWriter::new(File::create(png_path)?), info)?.write_header()?;
 
     if let Some(hdr) = hdr_data {
         writer.write_image_data(&hdr.data)?;
@@ -341,37 +333,31 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 .context("Image must have a gain map metadata but it's absent")?
                 .to_owned();
 
-            let image = AlohaImage {
-                width: sdr_info.width as u32,
-                height: sdr_info.height as u32,
-                color_type: jpeg_conv::pixel_format_to_aloha(&sdr_info.pixel_format)?,
-                bit_depth: jpeg_conv::bit_depth_to_aloha(&sdr_info.pixel_format)?,
-                color_profile_desc: if icc_profile.is_some() {
-                    ColorProfileDesc::Icc
-                } else {
-                    ColorProfileDesc::None
-                },
-                compression: 1,
-                has_gain_map: true,
-                cicp: None,
+            let image = AlohaImage::new(
+                sdr_info.width as u32,
+                sdr_info.height as u32,
+                jpeg_conv::pixel_format_to_aloha(&sdr_info.pixel_format)?,
+                jpeg_conv::bit_depth_to_aloha(&sdr_info.pixel_format)?,
+                1,
+                None,
                 icc_profile,
-                palette: None,
-                transparency_palette: None,
-                metadata: Metadata::from_source(format!(
+                None,
+                None,
+                Metadata::from_source(format!(
                     "Converted from {}",
                     jpeg_path.to_str().unwrap_or("<NOT FOUND>")
                 )),
-                data: sdr_data,
-                gain_map_metadata: Some(gmmd),
-                gain_map: Some(gm),
-            };
+                sdr_data,
+                Some(gmmd),
+                Some(gm),
+            )?;
 
-            write_aloha(aloha_path, &image)?;
+            image.write_to(BufWriter::new(File::create(aloha_path)?))?;
             return Ok(());
         }
     }
 
-    let mut reader = jpeg_decoder::Decoder::new(std::fs::File::open(jpeg_path)?);
+    let mut reader = jpeg_decoder::Decoder::new(File::open(jpeg_path)?);
     let data = reader.decode()?;
 
     // should be after `reader.decode()`
@@ -381,38 +367,33 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
 
     let icc_profile = reader.icc_profile();
 
-    let image = AlohaImage {
-        width: info.width as u32,
-        height: info.height as u32,
-        color_type: jpeg_conv::pixel_format_to_aloha(&info.pixel_format)?,
-        bit_depth: jpeg_conv::bit_depth_to_aloha(&info.pixel_format)?,
-        color_profile_desc: if icc_profile.is_some() {
-            ColorProfileDesc::Icc
-        } else {
-            ColorProfileDesc::None
-        },
-        compression: 1,
-        has_gain_map: false,
-        cicp: None,
+    let image = AlohaImage::new(
+        info.width as u32,
+        info.height as u32,
+        jpeg_conv::pixel_format_to_aloha(&info.pixel_format)?,
+        jpeg_conv::bit_depth_to_aloha(&info.pixel_format)?,
+        1,
+        None,
         icc_profile,
-        palette: None,
-        transparency_palette: None,
-        metadata: Metadata::from_source(format!(
+        None,
+        None,
+        Metadata::from_source(format!(
             "Converted from {}",
             jpeg_path.to_str().unwrap_or("<NOT FOUND>")
         )),
         data,
-        gain_map_metadata: None,
-        gain_map: None,
-    };
+        None,
+        None,
+    )?;
 
-    write_aloha(aloha_path, &image)?;
+    image.write_to(BufWriter::new(File::create(aloha_path)?))?;
     Ok(())
 }
 
 pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
-    let mut image = read_aloha(aloha_path)?;
+    let mut image = AlohaImage::read_from(BufReader::new(File::open(aloha_path)?))?;
     image.discard_alpha();
+    image.reduce_bit_depth();
 
     let color_type = jpeg_conv::color_type_from_aloha(&image.color_type)?;
 

@@ -4,10 +4,11 @@
 //! a compact, self-describing container for raster images. It is intended as
 //! a low-level building block: it focuses on faithful serialization of pixel
 //! data together with all information required to interpret it correctly
-//! (color management, palettes, metadata, and optional HDR gain map), and does
-//! **not** perform any color conversion or pixel format normalization.
+//! (color management, palettes, metadata, and optional HDR gain map).
 
 use std::io::{Read, Write};
+
+use crc32fast::Hasher;
 
 use crate::{
     color::{ColorProfileDesc, ColorType},
@@ -50,6 +51,7 @@ impl Metadata {
 /// information (ICC or CICP profile), optional palette, JSON metadata, and an
 /// optional gain map. Use [`write_aloha`] to encode an instance to disk and
 /// [`read_aloha`] to decode a file back into an `AlohaImage`.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct AlohaImage {
     /// The width of the image in pixels. Must be at least 1.
@@ -90,6 +92,54 @@ pub struct AlohaImage {
 }
 
 impl AlohaImage {
+    /// Returns an instance of `AlohaImage`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AlohaError::ValidationError`] if validation was failed.
+    pub fn new(
+        width: u32,
+        height: u32,
+        color_type: ColorType,
+        bit_depth: u8,
+        compression: u8,
+        cicp: Option<zencodec::Cicp>,
+        icc_profile: Option<Vec<u8>>,
+        palette: Option<Vec<u8>>,
+        transparency_palette: Option<Vec<u8>>,
+        metadata: Metadata,
+        data: Vec<u8>,
+        gain_map_metadata: Option<ultrahdr_core::GainMapMetadata>,
+        gain_map: Option<ultrahdr_core::GainMap>,
+    ) -> AlohaResult<Self> {
+        let image = Self {
+            width,
+            height,
+            color_type,
+            bit_depth,
+            color_profile_desc: if cicp.is_some() {
+                ColorProfileDesc::Cicp
+            } else if icc_profile.is_some() {
+                ColorProfileDesc::Icc
+            } else {
+                ColorProfileDesc::None
+            },
+            compression,
+            has_gain_map: gain_map_metadata.is_some() && gain_map.is_some(),
+            cicp,
+            icc_profile,
+            palette,
+            transparency_palette,
+            metadata,
+            data,
+            gain_map_metadata,
+            gain_map,
+        };
+
+        image.validate()?;
+        Ok(image)
+    }
+
     /// Validates the internal consistency of this `AlohaImage`.
     ///
     /// The following invariants are checked:
@@ -215,27 +265,512 @@ impl AlohaImage {
         })
     }
 
+    /// Encodes an `AlohaImage` to the `.aloha` binary format and writes it to the
+    /// provided `writer`.
+    ///
+    /// The function first calls [`AlohaImage::validate`] to ensure the image is
+    /// internally consistent, then serializes the header, optional CICP/ICC/palette/
+    /// metadata sections, compressed pixel data, optional gain map and its metadata,
+    /// and a trailing CRC32 checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Validation of `image` fails.
+    /// - Writing to `writer` fails.
+    /// - A required section (CICP, ICC, palette, or gain map with its metadata)
+    ///   is missing when the corresponding flag indicates it should be present.
+    /// - The compression algorithm in `image.compression` is unsupported.
+    pub fn write_to(&self, mut writer: impl Write) -> AlohaResult {
+        self.validate()?;
+
+        let mut hasher = crc32fast::Hasher::new();
+
+        // Writing the header
+        write_bytes(MAGIC, &mut writer, &mut hasher)?;
+        write_bytes(&VERSION.to_le_bytes(), &mut writer, &mut hasher)?;
+
+        write_bytes(&self.width.to_le_bytes(), &mut writer, &mut hasher)?;
+        write_bytes(&self.height.to_le_bytes(), &mut writer, &mut hasher)?;
+
+        write_bytes(
+            &[
+                self.color_type as u8,
+                self.bit_depth,
+                self.color_profile_desc as u8,
+                self.compression,
+                self.has_gain_map as u8,
+            ],
+            &mut writer,
+            &mut hasher,
+        )?;
+
+        // Writing the CICP section
+        if matches!(self.color_profile_desc, ColorProfileDesc::Cicp) {
+            let Some(cicp) = &self.cicp else {
+                return Err(AlohaError::CicpNotFound);
+            };
+
+            write_bytes(
+                &[
+                    cicp.color_primaries,
+                    cicp.transfer_characteristics,
+                    cicp.matrix_coefficients,
+                    cicp.full_range as u8,
+                ],
+                &mut writer,
+                &mut hasher,
+            )?;
+        }
+
+        // Writing the ICC profile section
+        if matches!(self.color_profile_desc, ColorProfileDesc::Icc) {
+            let Some(icc) = &self.icc_profile else {
+                return Err(AlohaError::IccNotFound);
+            };
+
+            write_bytes(&(icc.len() as u32).to_le_bytes(), &mut writer, &mut hasher)?;
+            write_bytes(icc, &mut writer, &mut hasher)?;
+        }
+
+        // Writing the palette section
+        if self.color_type.is_indexed() {
+            let Some(p) = &self.palette else {
+                return Err(AlohaError::PaletteNotFound("color".to_owned()));
+            };
+
+            write_bytes(&(p.len() as u16).to_le_bytes(), &mut writer, &mut hasher)?;
+            write_bytes(p, &mut writer, &mut hasher)?;
+
+            if self.color_type.has_alpha() {
+                let Some(tp) = &self.transparency_palette else {
+                    return Err(AlohaError::PaletteNotFound("transparency".to_owned()));
+                };
+
+                write_bytes(&[tp.len() as u8], &mut writer, &mut hasher)?;
+                write_bytes(tp, &mut writer, &mut hasher)?;
+            }
+        }
+
+        // Writing the metadata section
+        let meta_json = serde_json::to_vec(&self.metadata)?;
+        write_bytes(
+            &(meta_json.len() as u32).to_le_bytes(),
+            &mut writer,
+            &mut hasher,
+        )?;
+        write_bytes(&meta_json, &mut writer, &mut hasher)?;
+
+        // Writing the compressed pixel data section
+        let compressed = match self.compression {
+            0 => self.data.clone(),
+            1 => {
+                let filtered = delta_encode(
+                    &self.data,
+                    self.width as usize,
+                    self.height as usize,
+                    &self.color_type,
+                    self.bit_depth,
+                )?;
+                let mut enc =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+                enc.write_all(&filtered)?;
+                let compressed = enc.finish()?;
+                compressed
+            }
+            other => return Err(AlohaError::InvalidCompressionAlgorithm(other)),
+        };
+
+        write_bytes(
+            &(compressed.len() as u64).to_le_bytes(),
+            &mut writer,
+            &mut hasher,
+        )?;
+        write_bytes(&compressed, &mut writer, &mut hasher)?;
+
+        if self.has_gain_map {
+            // Writing the gain map metadata section
+            let Some(gain_map_params) = &self.gain_map_metadata else {
+                return Err(AlohaError::GainMapMetadataNotFound);
+            };
+
+            for i in 0..3 {
+                write_bytes(
+                    &gain_map_params.gain_map_max[i].to_le_bytes(),
+                    &mut writer,
+                    &mut hasher,
+                )?;
+                write_bytes(
+                    &gain_map_params.gain_map_min[i].to_le_bytes(),
+                    &mut writer,
+                    &mut hasher,
+                )?;
+                write_bytes(
+                    &gain_map_params.gamma[i].to_le_bytes(),
+                    &mut writer,
+                    &mut hasher,
+                )?;
+                write_bytes(
+                    &gain_map_params.base_offset[i].to_le_bytes(),
+                    &mut writer,
+                    &mut hasher,
+                )?;
+                write_bytes(
+                    &gain_map_params.alternate_offset[i].to_le_bytes(),
+                    &mut writer,
+                    &mut hasher,
+                )?;
+            }
+
+            write_bytes(
+                &gain_map_params.base_hdr_headroom.to_le_bytes(),
+                &mut writer,
+                &mut hasher,
+            )?;
+            write_bytes(
+                &gain_map_params.alternate_hdr_headroom.to_le_bytes(),
+                &mut writer,
+                &mut hasher,
+            )?;
+            write_bytes(
+                &[
+                    gain_map_params.use_base_color_space as u8,
+                    gain_map_params.backward_direction as u8,
+                ],
+                &mut writer,
+                &mut hasher,
+            )?;
+
+            // Writing the gain map section
+            let Some(gain_map) = &self.gain_map else {
+                return Err(AlohaError::GainMapNotFound);
+            };
+
+            let filtered = delta_encode(
+                &gain_map.data,
+                gain_map.width as usize,
+                gain_map.height as usize,
+                &ColorType::from_channels_count(gain_map.channels as usize)?,
+                8, // bit depth for gain map is always 8
+            )?;
+
+            let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+            enc.write_all(&filtered)?;
+            let compressed = enc.finish()?;
+
+            write_bytes(&gain_map.width.to_le_bytes(), &mut writer, &mut hasher)?;
+            write_bytes(&gain_map.height.to_le_bytes(), &mut writer, &mut hasher)?;
+            write_bytes(&[gain_map.channels], &mut writer, &mut hasher)?;
+
+            write_bytes(
+                &(compressed.len() as u64).to_le_bytes(),
+                &mut writer,
+                &mut hasher,
+            )?;
+            write_bytes(&compressed, &mut writer, &mut hasher)?;
+        }
+
+        // Writing the CRC32 section
+        writer.write_all(&hasher.finalize().to_le_bytes())?;
+        writer.flush()?;
+
+        Ok(())
+    }
+
+    /// Decodes an `.aloha` stream from the provided `reader` into an `AlohaImage`.
+    ///
+    /// The function reads the magic bytes and version, parses all sections
+    /// (header, optional CICP/ICC/palette/metadata, compressed pixel data, optional
+    /// gain map and its metadata), verifies the trailing CRC32 checksum, and finally
+    /// validates the decoded image via [`AlohaImage::validate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The stream does not start with the [`MAGIC`] bytes.
+    /// - The version is newer than the supported [`VERSION`].
+    /// - A section cannot be parsed correctly.
+    /// - The stored CRC32 checksum does not match the computed checksum.
+    /// - The compression algorithm is unsupported.
+    /// - The decoded image fails validation.
+    pub fn read_from(mut reader: impl Read) -> AlohaResult<Self> {
+        let mut hasher = crc32fast::Hasher::new();
+
+        // Reading the header
+        let mut magic = [0u8; 5];
+        reader.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(AlohaError::DecodingError("not an *.aloha file".to_owned()));
+        }
+        hasher.update(&magic);
+
+        let version = read_u16(&mut reader, &mut hasher)?;
+        if version > VERSION {
+            return Err(AlohaError::DecodingError(format!(
+                "unsupported version: {version}"
+            )));
+        }
+
+        let width = read_u32(&mut reader, &mut hasher)?;
+        let height = read_u32(&mut reader, &mut hasher)?;
+
+        let mut buf = [0u8; 5];
+        reader.read_exact(&mut buf)?;
+        hasher.update(&buf);
+
+        let color_type = ColorType::try_from(buf[0])?;
+        let bit_depth = buf[1];
+        let color_profile_desc = ColorProfileDesc::try_from(buf[2])?;
+        let compression = buf[3];
+        let has_gain_map = buf[4] != 0;
+
+        // Reading the CICP section
+        let cicp = if matches!(color_profile_desc, ColorProfileDesc::Cicp) {
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf)?;
+            hasher.update(&buf);
+
+            let color_primaries = buf[0];
+            let transfer_characteristics = buf[1];
+            let matrix_coefficients = buf[2];
+            let full_range = buf[3] != 0;
+
+            Some(zencodec::Cicp::new(
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                full_range,
+            ))
+        } else {
+            None
+        };
+
+        // Reading the ICC profile section
+        let icc_profile = if matches!(color_profile_desc, ColorProfileDesc::Icc) {
+            let icc_profile_len = read_u32(&mut reader, &mut hasher)?;
+
+            let mut icc_bytes = vec![0u8; icc_profile_len as usize];
+            reader.read_exact(&mut icc_bytes)?;
+            hasher.update(&icc_bytes);
+
+            Some(icc_bytes)
+        } else {
+            None
+        };
+
+        // Reading the palette section
+        let mut palette = None;
+        let mut transparency_palette = None;
+        if color_type.is_indexed() {
+            let palette_len = read_u16(&mut reader, &mut hasher)?;
+
+            let mut palette_bytes = vec![0u8; palette_len as usize];
+            reader.read_exact(&mut palette_bytes)?;
+            hasher.update(&palette_bytes);
+
+            palette = Some(palette_bytes);
+
+            if color_type.has_alpha() {
+                let tp_len = read_u8(&mut reader, &mut hasher)?;
+
+                let mut tp_bytes = vec![0u8; tp_len as usize];
+                reader.read_exact(&mut tp_bytes)?;
+                hasher.update(&tp_bytes);
+
+                transparency_palette = Some(tp_bytes);
+            }
+        }
+
+        // Reading the metadata section
+        let meta_len = read_u32(&mut reader, &mut hasher)?;
+
+        let mut meta_bytes = vec![0u8; meta_len as usize];
+        reader.read_exact(&mut meta_bytes)?;
+        hasher.update(&meta_bytes);
+
+        let metadata = serde_json::from_slice::<Metadata>(&meta_bytes)?;
+
+        // Reading the compressed data section
+        let data_len = read_u64(&mut reader, &mut hasher)?;
+
+        let mut pixels_bytes = vec![0u8; data_len as usize];
+        reader.read_exact(&mut pixels_bytes)?;
+        hasher.update(&pixels_bytes);
+
+        let data = match compression {
+            0 => pixels_bytes,
+            1 => {
+                let mut dec = flate2::read::ZlibDecoder::new(pixels_bytes.as_slice());
+                let mut filtered = Vec::new();
+                dec.read_to_end(&mut filtered)?;
+                delta_decode(
+                    &filtered,
+                    width as usize,
+                    height as usize,
+                    &color_type,
+                    bit_depth,
+                )?
+            }
+            _ => return Err(AlohaError::InvalidCompressionAlgorithm(compression)),
+        };
+
+        // Reading the gain map section
+        let mut gain_map_metadata = None;
+        let mut gain_map = None;
+
+        if has_gain_map {
+            let mut gain_map_max = [0.0f64; 3];
+            let mut gain_map_min = [0.0f64; 3];
+            let mut gamma = [0.0f64; 3];
+            let mut base_offset = [0.0f64; 3];
+            let mut alternate_offset = [0.0f64; 3];
+
+            for i in 0..3 {
+                gain_map_max[i] = read_f64(&mut reader, &mut hasher)?;
+                gain_map_min[i] = read_f64(&mut reader, &mut hasher)?;
+                gamma[i] = read_f64(&mut reader, &mut hasher)?;
+                base_offset[i] = read_f64(&mut reader, &mut hasher)?;
+                alternate_offset[i] = read_f64(&mut reader, &mut hasher)?;
+            }
+
+            let base_hdr_headroom = read_f64(&mut reader, &mut hasher)?;
+            let alternate_hdr_headroom = read_f64(&mut reader, &mut hasher)?;
+
+            let mut buf = [0u8; 2];
+            reader.read_exact(&mut buf)?;
+            hasher.update(&buf);
+
+            let use_base_color_space = buf[0] != 0;
+            let backward_direction = buf[1] != 0;
+
+            // this mess is due to the fact that the `GainMapMetadata` is non-exhaustive
+            let mut gmmd = ultrahdr_core::GainMapMetadata::default();
+            gmmd.gain_map_max = gain_map_max;
+            gmmd.gain_map_min = gain_map_min;
+            gmmd.gamma = gamma;
+            gmmd.base_offset = base_offset;
+            gmmd.alternate_offset = alternate_offset;
+            gmmd.base_hdr_headroom = base_hdr_headroom;
+            gmmd.alternate_hdr_headroom = alternate_hdr_headroom;
+            gmmd.use_base_color_space = use_base_color_space;
+            gmmd.backward_direction = backward_direction;
+            gain_map_metadata = Some(gmmd);
+
+            let width = read_u32(&mut reader, &mut hasher)?;
+            let height = read_u32(&mut reader, &mut hasher)?;
+            let channels = read_u8(&mut reader, &mut hasher)?;
+
+            let gain_map_len = read_u64(&mut reader, &mut hasher)?;
+            let mut gain_map_bytes = vec![0u8; gain_map_len as usize];
+            reader.read_exact(&mut gain_map_bytes)?;
+            hasher.update(&gain_map_bytes);
+
+            let mut dec = flate2::read::ZlibDecoder::new(gain_map_bytes.as_slice());
+            let mut filtered = Vec::new();
+            dec.read_to_end(&mut filtered)?;
+
+            let data = delta_decode(
+                &filtered,
+                width as usize,
+                height as usize,
+                &ColorType::from_channels_count(channels as usize)?,
+                8,
+            )?;
+
+            gain_map = Some(ultrahdr_core::GainMap {
+                width,
+                height,
+                channels,
+                data,
+            });
+        }
+
+        // Reading the CRC32 section
+        let mut crc32_bytes = [0u8; 4];
+        reader.read_exact(&mut crc32_bytes)?;
+
+        let stored_crc = u32::from_le_bytes(crc32_bytes);
+        let actual_crc = hasher.finalize();
+
+        if stored_crc != actual_crc {
+            return Err(AlohaError::DecodingError(format!(
+                "the checksum does not match: {stored_crc:08x} != {actual_crc:08x}"
+            )));
+        }
+
+        let image = AlohaImage {
+            width,
+            height,
+            color_type,
+            bit_depth,
+            color_profile_desc,
+            compression,
+            has_gain_map,
+            cicp,
+            icc_profile,
+            palette,
+            transparency_palette,
+            metadata,
+            data,
+            gain_map_metadata,
+            gain_map,
+        };
+
+        image.validate()?;
+        Ok(image)
+    }
+
+    /// Changes [`AlohaImage::bit_depth`] from 16 to 8 and rewrites its data.
+    pub fn reduce_bit_depth(&mut self) {
+        if self.bit_depth == 8 {
+            return;
+        }
+
+        let channels = self.color_type.channels();
+        self.data = self
+            .data
+            .chunks_exact(channels * 2)
+            .flat_map(|s| {
+                let mut out = vec![0u8; channels];
+                for c in 0..channels {
+                    out[c] = (u16::from_be_bytes([s[c * 2], s[c * 2 + 1]]) / 256) as u8;
+                }
+                out
+            })
+            .collect();
+
+        self.bit_depth = 8;
+    }
+
+    /// Removes alpha-channel from the `AlohaImage`, rewrites its data, and changes
+    /// its `color_type`.
     pub fn discard_alpha(&mut self) {
         match self.color_type {
             ColorType::GrayscaleAlpha => {
-                self.data = self.data.chunks_exact(2).map(|s| s[0]).collect();
+                self.data = if self.bit_depth == 8 {
+                    self.data.chunks_exact(2).map(|s| s[0]).collect()
+                } else {
+                    self.data
+                        .chunks_exact(4)
+                        .flat_map(|s| s[..2].to_owned())
+                        .collect()
+                };
+
                 self.color_type = ColorType::Grayscale;
             }
 
             ColorType::Rgba => {
-                if self.bit_depth == 8 {
-                    self.data = self
-                        .data
+                self.data = if self.bit_depth == 8 {
+                    self.data
                         .chunks_exact(4)
-                        .flat_map(|s| s[..3].to_owned())
-                        .collect();
+                        .flat_map(|s| s[..2].to_owned())
+                        .collect()
                 } else {
-                    self.data = self
-                        .data
+                    self.data
                         .chunks_exact(8)
                         .flat_map(|s| s[..6].to_owned())
-                        .collect();
-                }
+                        .collect()
+                };
 
                 self.color_type = ColorType::Rgb;
             }
@@ -243,440 +778,12 @@ impl AlohaImage {
             ColorType::IndexedAlpha => {
                 self.data = self.data.chunks_exact(2).map(|s| s[0]).collect();
                 self.color_type = ColorType::Indexed;
+                self.transparency_palette = None;
             }
 
             _ => {}
         }
     }
-}
-
-/// Encodes an [`AlohaImage`] to the `.aloha`binary format and writes it to `path`.
-///
-/// The function first calls [`AlohaImage::validate`] to ensure the image is
-/// internally consistent, then serializes the header, optional CICP/ICC/palette/
-/// metadata sections, compressed pixel data, optional gain map, and a trailing
-/// CRC32 checksum.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Validation of `image` fails.
-/// - The file at `path` cannot be created or written to.
-/// - A required section (CICP, ICC, palette, or gain map with its metadata)
-///   is missing when the corresponding flag indicates it should be present.
-/// - The compression algorithm in `image.compression` is unsupported.
-pub fn write_aloha(path: &std::path::Path, image: &AlohaImage) -> AlohaResult {
-    image.validate()?;
-
-    let file = std::fs::File::create(path)?;
-    let mut buffer: Vec<u8> = Vec::new();
-
-    // Writing the header
-    buffer.extend_from_slice(MAGIC);
-    buffer.extend_from_slice(&VERSION.to_le_bytes());
-
-    buffer.extend_from_slice(&image.width.to_le_bytes());
-    buffer.extend_from_slice(&image.height.to_le_bytes());
-
-    buffer.push(image.color_type as u8);
-    buffer.push(image.bit_depth);
-    buffer.push(image.color_profile_desc as u8);
-    buffer.push(image.compression);
-    buffer.push(image.has_gain_map as u8);
-
-    // Writing the CICP section
-    if matches!(image.color_profile_desc, ColorProfileDesc::Cicp) {
-        let Some(cicp) = &image.cicp else {
-            return Err(AlohaError::CicpNotFound);
-        };
-
-        buffer.push(cicp.color_primaries);
-        buffer.push(cicp.transfer_characteristics);
-        buffer.push(cicp.matrix_coefficients);
-        buffer.push(cicp.full_range as u8);
-    }
-
-    // Writing the ICC profile section
-    if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
-        let Some(icc) = &image.icc_profile else {
-            return Err(AlohaError::IccNotFound);
-        };
-
-        buffer.extend_from_slice(&(icc.len() as u32).to_le_bytes());
-        buffer.extend_from_slice(icc);
-    }
-
-    // Writing the palette section
-    if image.color_type.is_indexed() {
-        let Some(p) = &image.palette else {
-            return Err(AlohaError::PaletteNotFound("color".to_owned()));
-        };
-
-        buffer.extend_from_slice(&(p.len() as u16).to_le_bytes());
-        buffer.extend_from_slice(p);
-
-        if image.color_type.has_alpha() {
-            let Some(tp) = &image.transparency_palette else {
-                return Err(AlohaError::PaletteNotFound("transparency".to_owned()));
-            };
-
-            buffer.push(tp.len() as u8);
-            buffer.extend_from_slice(tp);
-        }
-    }
-
-    // Writing the metadata section
-    let meta_json = serde_json::to_vec(&image.metadata)?;
-    buffer.extend_from_slice(&(meta_json.len() as u32).to_le_bytes());
-    buffer.extend_from_slice(&meta_json);
-
-    // Writing the compressed pixel data section
-    let compressed = match image.compression {
-        0 => image.data.clone(),
-        1 => {
-            let filtered = delta_encode(
-                &image.data,
-                image.width as usize,
-                image.height as usize,
-                &image.color_type,
-                image.bit_depth,
-            )?;
-            let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-            enc.write_all(&filtered)?;
-            let compressed = enc.finish()?;
-            compressed
-        }
-        other => return Err(AlohaError::InvalidCompressionAlgorithm(other)),
-    };
-
-    buffer.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
-    buffer.extend_from_slice(&compressed);
-
-    if image.has_gain_map {
-        // Writing the gain map metadata section
-        let Some(gain_map_params) = &image.gain_map_metadata else {
-            return Err(AlohaError::GainMapMetadataNotFound);
-        };
-
-        for i in 0..3 {
-            buffer.extend_from_slice(&gain_map_params.gain_map_max[i].to_le_bytes());
-            buffer.extend_from_slice(&gain_map_params.gain_map_min[i].to_le_bytes());
-            buffer.extend_from_slice(&gain_map_params.gamma[i].to_le_bytes());
-            buffer.extend_from_slice(&gain_map_params.base_offset[i].to_le_bytes());
-            buffer.extend_from_slice(&gain_map_params.alternate_offset[i].to_le_bytes());
-        }
-
-        buffer.extend_from_slice(&gain_map_params.base_hdr_headroom.to_le_bytes());
-        buffer.extend_from_slice(&gain_map_params.alternate_hdr_headroom.to_le_bytes());
-        buffer.push(gain_map_params.use_base_color_space as u8);
-        buffer.push(gain_map_params.backward_direction as u8);
-
-        // Writing the gain map section
-        let Some(gain_map) = &image.gain_map else {
-            return Err(AlohaError::GainMapNotFound);
-        };
-
-        let filtered = delta_encode(
-            &gain_map.data,
-            gain_map.width as usize,
-            gain_map.height as usize,
-            &ColorType::from_channels_count(gain_map.channels as usize)?,
-            8, // bit depth for gain map is always 8
-        )?;
-
-        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-        enc.write_all(&filtered)?;
-        let compressed = enc.finish()?;
-
-        buffer.extend_from_slice(&gain_map.width.to_le_bytes());
-        buffer.extend_from_slice(&gain_map.height.to_le_bytes());
-        buffer.push(gain_map.channels);
-
-        buffer.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
-        buffer.extend_from_slice(&compressed);
-    }
-
-    // Writing the CRC32 section
-    let checksum = crc32fast::hash(&buffer);
-    buffer.extend_from_slice(&checksum.to_le_bytes());
-
-    // Writing the buffer to a file
-    let mut w = std::io::BufWriter::new(file);
-    w.write_all(&buffer)?;
-    w.flush()?;
-
-    Ok(())
-}
-
-/// Decodes an `.aloha` file from `path` into an [`AlohaImage`].
-///
-/// The function reads the magic bytes and version, parses all sections
-/// (header, optional CICP/ICC/palette/metadata, compressed pixel data, optional
-/// gain map and its metadata), verifies the trailing CRC32 checksum, and finally
-/// validates the decoded image via [`AlohaImage::validate`].
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - The file does not start with the `ALOHA` magic bytes.
-/// - The version is newer than the supported [`VERSION`].
-/// - A section cannot be parsed correctly.
-/// - The stored CRC32 checksum does not match the computed checksum.
-/// - The compression algorithm is unsupported.
-/// - The decoded image fails validation.
-pub fn read_aloha(path: &std::path::Path) -> AlohaResult<AlohaImage> {
-    let file = std::fs::File::open(path)?;
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut r = std::io::BufReader::new(file);
-
-    // Reading the header
-    let mut magic = [0u8; 5];
-    r.read_exact(&mut magic)?;
-    if &magic != MAGIC {
-        return Err(AlohaError::DecodingError("not an *.aloha file".to_owned()));
-    }
-    buffer.extend_from_slice(&magic);
-
-    let version = read_u16(&mut r, &mut buffer)?;
-    if version > VERSION {
-        return Err(AlohaError::DecodingError(format!(
-            "unsupported version: {version}"
-        )));
-    }
-
-    let width = read_u32(&mut r, &mut buffer)?;
-    let height = read_u32(&mut r, &mut buffer)?;
-
-    let mut one = [0u8; 1];
-
-    r.read_exact(&mut one)?;
-    let color_type = one[0];
-    buffer.push(color_type);
-    let color_type = ColorType::try_from(color_type)?;
-
-    r.read_exact(&mut one)?;
-    let bit_depth = one[0];
-    buffer.push(bit_depth);
-
-    r.read_exact(&mut one)?;
-    buffer.push(one[0]);
-    let color_profile_desc = ColorProfileDesc::try_from(one[0])?;
-
-    r.read_exact(&mut one)?;
-    let compression = one[0];
-    buffer.push(compression);
-
-    r.read_exact(&mut one)?;
-    buffer.push(one[0]);
-    let has_gain_map = one[0] != 0;
-
-    // Reading the CICP section
-    let cicp = if matches!(color_profile_desc, ColorProfileDesc::Cicp) {
-        r.read_exact(&mut one)?;
-        let color_primaries = one[0];
-        buffer.push(color_primaries);
-
-        r.read_exact(&mut one)?;
-        let transfer_characteristics = one[0];
-        buffer.push(transfer_characteristics);
-
-        r.read_exact(&mut one)?;
-        let matrix_coefficients = one[0];
-        buffer.push(matrix_coefficients);
-
-        r.read_exact(&mut one)?;
-        buffer.push(one[0]);
-        let full_range = one[0] != 0;
-
-        Some(zencodec::Cicp::new(
-            color_primaries,
-            transfer_characteristics,
-            matrix_coefficients,
-            full_range,
-        ))
-    } else {
-        None
-    };
-
-    // Reading the ICC profile section
-    let icc_profile = if matches!(color_profile_desc, ColorProfileDesc::Icc) {
-        let icc_profile_len = read_u32(&mut r, &mut buffer)?;
-
-        let mut icc_bytes = vec![0u8; icc_profile_len as usize];
-        r.read_exact(&mut icc_bytes)?;
-        buffer.extend_from_slice(&icc_bytes);
-
-        Some(icc_bytes)
-    } else {
-        None
-    };
-
-    // Reading the palette section
-    let mut palette = None;
-    let mut transparency_palette = None;
-    if color_type.is_indexed() {
-        let palette_len = read_u16(&mut r, &mut buffer)?;
-
-        let mut palette_bytes = vec![0u8; palette_len as usize];
-        r.read_exact(&mut palette_bytes)?;
-        buffer.extend_from_slice(&palette_bytes);
-
-        palette = Some(palette_bytes);
-
-        if color_type.has_alpha() {
-            r.read_exact(&mut one)?;
-            let tp_len = one[0];
-            buffer.push(tp_len);
-
-            let mut tp_bytes = vec![0u8; tp_len as usize];
-            r.read_exact(&mut tp_bytes)?;
-            buffer.extend_from_slice(&tp_bytes);
-
-            transparency_palette = Some(tp_bytes);
-        }
-    }
-
-    // Reading the metadata section
-    let meta_len = read_u32(&mut r, &mut buffer)?;
-
-    let mut meta_bytes = vec![0u8; meta_len as usize];
-    r.read_exact(&mut meta_bytes)?;
-    buffer.extend_from_slice(&meta_bytes);
-
-    let metadata = serde_json::from_slice::<Metadata>(&meta_bytes)?;
-
-    // Reading the compressed data section
-    let data_len = read_u64(&mut r, &mut buffer)?;
-
-    let mut pixels_bytes = vec![0u8; data_len as usize];
-    r.read_exact(&mut pixels_bytes)?;
-    buffer.extend_from_slice(&pixels_bytes);
-
-    let data = match compression {
-        0 => pixels_bytes,
-        1 => {
-            let mut dec = flate2::read::ZlibDecoder::new(pixels_bytes.as_slice());
-            let mut filtered = Vec::new();
-            dec.read_to_end(&mut filtered)?;
-            delta_decode(
-                &filtered,
-                width as usize,
-                height as usize,
-                &color_type,
-                bit_depth,
-            )?
-        }
-        _ => return Err(AlohaError::InvalidCompressionAlgorithm(compression)),
-    };
-
-    // Reading the gain map section
-    let mut gain_map_metadata = None;
-    let mut gain_map = None;
-
-    if has_gain_map {
-        let mut gain_map_max = [0.0f64; 3];
-        let mut gain_map_min = [0.0f64; 3];
-        let mut gamma = [0.0f64; 3];
-        let mut base_offset = [0.0f64; 3];
-        let mut alternate_offset = [0.0f64; 3];
-
-        for i in 0..3 {
-            gain_map_max[i] = read_f64(&mut r, &mut buffer)?;
-            gain_map_min[i] = read_f64(&mut r, &mut buffer)?;
-            gamma[i] = read_f64(&mut r, &mut buffer)?;
-            base_offset[i] = read_f64(&mut r, &mut buffer)?;
-            alternate_offset[i] = read_f64(&mut r, &mut buffer)?;
-        }
-
-        let base_hdr_headroom = read_f64(&mut r, &mut buffer)?;
-        let alternate_hdr_headroom = read_f64(&mut r, &mut buffer)?;
-
-        r.read_exact(&mut one)?;
-        buffer.push(one[0]);
-        let use_base_color_space = one[0] != 0;
-
-        r.read_exact(&mut one)?;
-        buffer.push(one[0]);
-        let backward_direction = one[0] != 0;
-
-        // this mess is due to the fact that the `GainMapMetadata` is non-exhaustive
-        let mut gmmd = ultrahdr_core::GainMapMetadata::default();
-        gmmd.gain_map_max = gain_map_max;
-        gmmd.gain_map_min = gain_map_min;
-        gmmd.gamma = gamma;
-        gmmd.base_offset = base_offset;
-        gmmd.alternate_offset = alternate_offset;
-        gmmd.base_hdr_headroom = base_hdr_headroom;
-        gmmd.alternate_hdr_headroom = alternate_hdr_headroom;
-        gmmd.use_base_color_space = use_base_color_space;
-        gmmd.backward_direction = backward_direction;
-        gain_map_metadata = Some(gmmd);
-
-        let width = read_u32(&mut r, &mut buffer)?;
-        let height = read_u32(&mut r, &mut buffer)?;
-
-        r.read_exact(&mut one)?;
-        let channels = one[0];
-        buffer.push(channels);
-
-        let gain_map_len = read_u64(&mut r, &mut buffer)?;
-        let mut gain_map_bytes = vec![0u8; gain_map_len as usize];
-        r.read_exact(&mut gain_map_bytes)?;
-        buffer.extend_from_slice(&gain_map_bytes);
-
-        let mut dec = flate2::read::ZlibDecoder::new(gain_map_bytes.as_slice());
-        let mut filtered = Vec::new();
-        dec.read_to_end(&mut filtered)?;
-
-        let data = delta_decode(
-            &filtered,
-            width as usize,
-            height as usize,
-            &ColorType::from_channels_count(channels as usize)?,
-            8,
-        )?;
-
-        gain_map = Some(ultrahdr_core::GainMap {
-            width,
-            height,
-            channels,
-            data,
-        });
-    }
-
-    // Reading the CRC32 section
-    let mut crc32_bytes = [0u8; 4];
-    r.read_exact(&mut crc32_bytes)?;
-
-    let stored_crc = u32::from_le_bytes(crc32_bytes);
-    let actual_crc = crc32fast::hash(&buffer);
-
-    if stored_crc != actual_crc {
-        return Err(AlohaError::DecodingError(format!(
-            "the checksum does not match: {stored_crc:08x} != {actual_crc:08x}"
-        )));
-    }
-
-    let image = AlohaImage {
-        width,
-        height,
-        color_type,
-        bit_depth,
-        color_profile_desc,
-        compression,
-        has_gain_map,
-        cicp,
-        icc_profile,
-        palette,
-        transparency_palette,
-        metadata,
-        data,
-        gain_map_metadata,
-        gain_map,
-    };
-
-    image.validate()?;
-    Ok(image)
 }
 
 /// Applies delta encoding to `data` in-place and returns the encoded bytes.
@@ -761,30 +868,43 @@ fn delta_decode(
     Ok(out)
 }
 
-fn read_u16(r: &mut impl Read, buf: &mut Vec<u8>) -> AlohaResult<u16> {
+fn write_bytes(bytes: &[u8], w: &mut impl Write, hasher: &mut Hasher) -> AlohaResult {
+    w.write_all(bytes)?;
+    hasher.update(bytes);
+    Ok(())
+}
+
+fn read_u8(r: &mut impl Read, hasher: &mut Hasher) -> AlohaResult<u8> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b)?;
+    hasher.update(&b);
+    Ok(b[0])
+}
+
+fn read_u16(r: &mut impl Read, hasher: &mut Hasher) -> AlohaResult<u16> {
     let mut b = [0u8; 2];
     r.read_exact(&mut b)?;
-    buf.extend_from_slice(&b);
+    hasher.update(&b);
     Ok(u16::from_le_bytes(b))
 }
 
-fn read_u32(r: &mut impl Read, buf: &mut Vec<u8>) -> AlohaResult<u32> {
+fn read_u32(r: &mut impl Read, hasher: &mut Hasher) -> AlohaResult<u32> {
     let mut b = [0u8; 4];
     r.read_exact(&mut b)?;
-    buf.extend_from_slice(&b);
+    hasher.update(&b);
     Ok(u32::from_le_bytes(b))
 }
 
-fn read_u64(r: &mut impl Read, buf: &mut Vec<u8>) -> AlohaResult<u64> {
+fn read_u64(r: &mut impl Read, hasher: &mut Hasher) -> AlohaResult<u64> {
     let mut b = [0u8; 8];
     r.read_exact(&mut b)?;
-    buf.extend_from_slice(&b);
+    hasher.update(&b);
     Ok(u64::from_le_bytes(b))
 }
 
-fn read_f64(r: &mut impl Read, buf: &mut Vec<u8>) -> AlohaResult<f64> {
+fn read_f64(r: &mut impl Read, hasher: &mut Hasher) -> AlohaResult<f64> {
     let mut b = [0u8; 8];
     r.read_exact(&mut b)?;
-    buf.extend_from_slice(&b);
+    hasher.update(&b);
     Ok(f64::from_le_bytes(b))
 }

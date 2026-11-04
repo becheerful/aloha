@@ -3,6 +3,7 @@ rust_i18n::i18n!("locales");
 use std::path::Path;
 
 use eframe::egui::{self, Ui};
+use modern_egui::theme::UiButtons;
 use rust_i18n::t;
 
 mod utils;
@@ -10,7 +11,6 @@ mod utils;
 struct AlohaViewer {
     locale: &'static str,
     file_name: String,
-    expanded: bool,
     texture: Option<egui::TextureHandle>,
     error: Option<String>,
     zoom: f32,
@@ -25,8 +25,7 @@ impl AlohaViewer {
 
         Self {
             locale: "en",
-            file_name: "File not selected".to_owned(),
-            expanded: false,
+            file_name: t!("file-not-selected", locale = "en").into_owned(),
             texture: None,
             error: None,
             zoom: 1.0,
@@ -36,7 +35,15 @@ impl AlohaViewer {
     }
 
     fn load(&mut self, ui: &mut Ui, path: &Path) {
-        match aloha_core::read_aloha(path) {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                self.error = Some(e.to_string());
+                return;
+            }
+        };
+
+        match aloha_core::AlohaImage::read_from(std::io::BufReader::new(file)) {
             Ok(image) => match utils::aloha_to_rgba8(&image) {
                 Ok(data) => {
                     let color = egui::ColorImage::from_rgba_unmultiplied(
@@ -51,7 +58,7 @@ impl AlohaViewer {
 
                         None => {
                             self.texture = Some(ui.load_texture(
-                                path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+                                "image",
                                 color,
                                 egui::TextureOptions::NEAREST,
                             ));
@@ -63,7 +70,6 @@ impl AlohaViewer {
                         .and_then(|s| s.to_str())
                         .unwrap_or("?")
                         .to_owned();
-                    self.expanded = true;
                 }
 
                 Err(e) => {
@@ -158,28 +164,27 @@ impl eframe::App for AlohaViewer {
                     }
                 }
 
-                if ui.button(t!("convert-in", locale = self.locale)).clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter(t!("images", locale = self.locale), &["png", "jpg", "jpeg"])
-                        .pick_file()
-                    {
-                        self.convert_to(ui, &path);
+                ui.menu_button(t!("convert", locale = self.locale), |ui| {
+                    if ui.button(t!("in-aloha", locale = self.locale)).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(t!("images", locale = self.locale), &["png", "jpg", "jpeg"])
+                            .pick_file()
+                        {
+                            self.convert_to(ui, &path);
+                        }
                     }
-                }
 
-                if ui
-                    .button(t!("convert-from", locale = self.locale))
-                    .clicked()
-                {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter(t!("aloha-images", locale = self.locale), &["aloha"])
-                        .pick_file()
-                    {
-                        self.pending_input = Some(path);
+                    if ui.button(t!("from-aloha", locale = self.locale)).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(t!("aloha-images", locale = self.locale), &["aloha"])
+                            .pick_file()
+                        {
+                            self.pending_input = Some(path);
+                        }
                     }
-                }
+                });
 
-                if ui.button(t!("exit", locale = self.locale)).clicked() {
+                if ui.danger_button(t!("exit", locale = self.locale)).clicked() {
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -212,14 +217,20 @@ impl eframe::App for AlohaViewer {
                     self.auto_zoom = false;
                 }
 
-                ui.checkbox(&mut self.auto_zoom, t!("fit", locale = self.locale));
+                ui.checkbox(&mut self.auto_zoom, t!("auto", locale = self.locale));
             }
         });
 
-        let mut top = self.expanded;
-        egui::Panel::top("top_pannel").show_collapsible(ui, &mut top, |ui| {
+        egui::Panel::top("top_pannel").show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                ui.label(&self.file_name);
+                ui.label(match &self.texture {
+                    Some(t) => {
+                        let size = t.size();
+                        format!("{} ({}x{})", self.file_name, size[0], size[1])
+                    }
+
+                    None => t!("file-not-selected", locale = self.locale).into_owned(),
+                });
             });
         });
 
@@ -253,7 +264,7 @@ impl eframe::App for AlohaViewer {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui, |ui| {
                     ui.label(t!(
-                        "convert-in-window",
+                        "convert-in",
                         locale = self.locale,
                         name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
                     ));
@@ -271,7 +282,10 @@ impl eframe::App for AlohaViewer {
                             close = true;
                         }
 
-                        if ui.button(t!("cancel", locale = self.locale)).clicked() {
+                        if ui
+                            .danger_button(t!("cancel", locale = self.locale))
+                            .clicked()
+                        {
                             close = true;
                         }
                     });
