@@ -1,6 +1,6 @@
 [package]
 name = "aloha-core"
-version = "0.7.0"
+version = "0.8.0"
 edition.workspace = true
 description = "Core types and codec for the ALOHA image format"
 
@@ -8,7 +8,8 @@ description = "Core types and codec for the ALOHA image format"
 thiserror = "2.0"
 flate2 = "1.1"
 crc32fast = "1.5"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+xmpkit.workspace = true
 ultrahdr-core.workspace = true
 zencodec.workspace = true
+uuid = { version = "1", features = [ "v7" ] }
+chrono = "0.4"

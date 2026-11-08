@@ -18,6 +18,8 @@ pub enum AlohaError {
     InvalidColorProfileDesc(u8),
     #[error("invalid compression algorithm: {0}")]
     InvalidCompressionAlgorithm(u8),
+    #[error("invalid metadata: {0}")]
+    InvalidMetadata(String),
     #[error("invalid channels count: {0}")]
     InvalidChannelsCount(usize),
     // "not found" errors
@@ -36,8 +38,8 @@ pub enum AlohaError {
     Io(#[from] std::io::Error),
     #[error("Ultra HDR error: {0}")]
     UltraHdr(#[from] ultrahdr_core::Error),
-    #[error("serde serialization error: {0}")]
-    SerdeJson(#[from] serde_json::Error),
+    #[error("XMPKit error: {0}")]
+    XmpKit(#[from] xmpkit::XmpError),
 }
 
 pub type AlohaResult<T = ()> = Result<T, AlohaError>;

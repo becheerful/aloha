@@ -3,8 +3,9 @@ rust_i18n::i18n!("locales");
 use std::path::Path;
 
 use eframe::egui::{self, Ui};
-use modern_egui::theme::UiButtons;
 use rust_i18n::t;
+
+use crate::utils::xmp_value_to_string;
 
 mod utils;
 
@@ -16,12 +17,15 @@ struct AlohaViewer {
     zoom: f32,
     auto_zoom: bool,
     pending_input: Option<std::path::PathBuf>,
+    convert_format: &'static str,
+    show_metadata: bool,
+    metadata: Option<aloha_core::metadata::Metadata>,
+    image_info: Option<utils::ImageInfo>,
 }
 
 impl AlohaViewer {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
-        modern_egui::theme::apply(&cc.egui_ctx);
 
         Self {
             locale: "en",
@@ -31,6 +35,10 @@ impl AlohaViewer {
             zoom: 1.0,
             auto_zoom: true,
             pending_input: None,
+            convert_format: "png",
+            show_metadata: false,
+            metadata: None,
+            image_info: None,
         }
     }
 
@@ -44,7 +52,7 @@ impl AlohaViewer {
         };
 
         match aloha_core::AlohaImage::read_from(std::io::BufReader::new(file)) {
-            Ok(image) => match utils::aloha_to_rgba8(&image) {
+            Ok(mut image) => match utils::aloha_to_rgba8(&mut image) {
                 Ok(data) => {
                     let color = egui::ColorImage::from_rgba_unmultiplied(
                         [image.width as usize, image.height as usize],
@@ -65,6 +73,11 @@ impl AlohaViewer {
                         }
                     }
 
+                    self.metadata = Some(image.metadata.clone());
+                    self.image_info = Some(utils::ImageInfo {
+                        width: image.width,
+                        height: image.height,
+                    });
                     self.file_name = path
                         .file_stem()
                         .and_then(|s| s.to_str())
@@ -141,13 +154,175 @@ impl AlohaViewer {
                     .map_err(|e| self.error = Some(e.to_string()));
             }
 
-            "jpg" | "jpeg" => {
+            "jpg" => {
                 let _ = aloha_convert::aloha_to_jpeg(&path, &out)
                     .map_err(|e| self.error = Some(e.to_string()));
             }
 
             _ => unreachable!(),
         };
+    }
+
+    fn draw_metadata_window(&mut self, ui: &mut Ui) {
+        if let Some(metadata) = &self.metadata
+            && self.show_metadata == true
+        {
+            // `.unwrap()` here is safe because the existence of `Metadata` guarantees the existance of `ImageInfo`
+            let image_info = self.image_info.as_ref().unwrap();
+
+            egui::Window::new(t!("metadata", locale = self.locale))
+                .open(&mut self.show_metadata)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        egui::Grid::new("imagemetadatagrid")
+                            .num_columns(2)
+                            .max_col_width(ui.available_width())
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label(t!("width", locale = self.locale));
+                                ui.label(format!("{}", image_info.width));
+                                ui.end_row();
+
+                                ui.label(t!("height", locale = self.locale));
+                                ui.label(format!("{}", image_info.height));
+                                ui.end_row();
+
+                                if let Some(title) = &metadata.title {
+                                    ui.label(t!("title", locale = self.locale));
+                                    ui.label(xmp_value_to_string(title));
+                                    ui.end_row();
+                                }
+
+                                if let Some(creators) = &metadata.creators {
+                                    ui.label(t!("creators", locale = self.locale));
+                                    ui.label(xmp_value_to_string(creators));
+                                    ui.end_row();
+                                }
+
+                                if let Some(contributors) = &metadata.contributors {
+                                    ui.label(t!("contributors", locale = self.locale));
+                                    ui.label(xmp_value_to_string(contributors));
+                                    ui.end_row();
+                                }
+
+                                if let Some(publishers) = &metadata.publishers {
+                                    ui.label(t!("publishers", locale = self.locale));
+                                    ui.label(xmp_value_to_string(publishers));
+                                    ui.end_row();
+                                }
+
+                                if let Some(subject) = &metadata.subject {
+                                    ui.label(t!("subject", locale = self.locale));
+                                    ui.label(xmp_value_to_string(subject));
+                                    ui.end_row();
+                                }
+
+                                if let Some(description) = &metadata.description {
+                                    ui.label(t!("description", locale = self.locale));
+                                    ui.label(xmp_value_to_string(description));
+                                    ui.end_row();
+                                }
+
+                                if let Some(dates) = &metadata.dates {
+                                    ui.label(t!("dates", locale = self.locale));
+                                    ui.label(xmp_value_to_string(dates));
+                                    ui.end_row();
+                                }
+
+                                if let Some(rtype) = &metadata.rtype {
+                                    ui.label(t!("type", locale = self.locale));
+                                    ui.label(xmp_value_to_string(rtype));
+                                    ui.end_row();
+                                }
+
+                                if let Some(format) = &metadata.format {
+                                    ui.label(t!("format", locale = self.locale));
+                                    ui.label(xmp_value_to_string(format));
+                                    ui.end_row();
+                                }
+
+                                if let Some(identifier) = &metadata.identifier {
+                                    ui.label(t!("identifier", locale = self.locale));
+                                    ui.label(xmp_value_to_string(identifier));
+                                    ui.end_row();
+                                }
+
+                                if let Some(source) = &metadata.source {
+                                    ui.label(t!("source", locale = self.locale));
+                                    ui.label(xmp_value_to_string(source));
+                                    ui.end_row();
+                                }
+
+                                if let Some(language) = &metadata.language {
+                                    ui.label(t!("language", locale = self.locale));
+                                    ui.label(xmp_value_to_string(language));
+                                    ui.end_row();
+                                }
+
+                                if let Some(relations) = &metadata.relations {
+                                    ui.label(t!("relations", locale = self.locale));
+                                    ui.label(xmp_value_to_string(relations));
+                                    ui.end_row();
+                                }
+
+                                if let Some(coverage) = &metadata.coverage {
+                                    ui.label(t!("coverage", locale = self.locale));
+                                    ui.label(xmp_value_to_string(coverage));
+                                    ui.end_row();
+                                }
+
+                                if let Some(rights) = &metadata.rights {
+                                    ui.label(t!("rights", locale = self.locale));
+                                    ui.label(xmp_value_to_string(rights));
+                                    ui.end_row();
+                                }
+                            })
+                    })
+                });
+        }
+    }
+
+    fn draw_convert_window(&mut self, ui: &mut Ui) {
+        if let Some(path) = self.pending_input.clone() {
+            let modal = egui::Modal::new(egui::Id::new("convertfromalohamodal")).show(ui, |ui| {
+                ui.heading(t!("select-format", locale = self.locale));
+
+                ui.label(t!(
+                    "convert-in",
+                    locale = self.locale,
+                    name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
+                ));
+
+                ui.add_space(4.0);
+
+                egui::ComboBox::from_id_salt(egui::IdSalt::new("formatcombobox"))
+                    .selected_text(self.convert_format)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.convert_format, "png", "png");
+                        ui.selectable_value(&mut self.convert_format, "jpg", "jpg");
+                    });
+                ui.separator();
+
+                egui::Sides::new().show(
+                    ui,
+                    |_| {},
+                    |ui| {
+                        if ui.button(t!("cancel", locale = self.locale)).clicked() {
+                            ui.close();
+                        }
+
+                        if ui.button(t!("confirm", locale = self.locale)).clicked() {
+                            self.convert_from(ui, &path, self.convert_format);
+                            ui.close();
+                        }
+                    },
+                );
+            });
+
+            if modal.should_close() {
+                self.pending_input = None;
+            }
+        }
     }
 }
 
@@ -184,7 +359,7 @@ impl eframe::App for AlohaViewer {
                     }
                 });
 
-                if ui.danger_button(t!("exit", locale = self.locale)).clicked() {
+                if ui.button(t!("exit", locale = self.locale)).clicked() {
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -218,6 +393,13 @@ impl eframe::App for AlohaViewer {
                 }
 
                 ui.checkbox(&mut self.auto_zoom, t!("auto", locale = self.locale));
+            }
+
+            if self.texture.is_some() {
+                ui.separator();
+                if ui.button(t!("metadata", locale = self.locale)).clicked() {
+                    self.show_metadata = !self.show_metadata;
+                }
             }
         });
 
@@ -256,45 +438,8 @@ impl eframe::App for AlohaViewer {
             }
         });
 
-        if let Some(path) = self.pending_input.clone() {
-            let mut close = false;
-            egui::Window::new(t!("select-format", locale = self.locale))
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ui, |ui| {
-                    ui.label(t!(
-                        "convert-in",
-                        locale = self.locale,
-                        name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
-                    ));
-
-                    ui.add_space(4.0);
-
-                    ui.horizontal(|ui| {
-                        if ui.button("PNG").clicked() {
-                            self.convert_from(ui, &path, "png");
-                            close = true;
-                        }
-
-                        if ui.button("JPEG").clicked() {
-                            self.convert_from(ui, &path, "jpg");
-                            close = true;
-                        }
-
-                        if ui
-                            .danger_button(t!("cancel", locale = self.locale))
-                            .clicked()
-                        {
-                            close = true;
-                        }
-                    });
-                });
-
-            if close {
-                self.pending_input = None;
-            }
-        }
+        self.draw_metadata_window(ui);
+        self.draw_convert_window(ui);
     }
 }
 

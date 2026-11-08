@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0
+
+**Format Version:** 0 \
+**Date:** 2026-11-08
+
+### Changes
+
+Metadata is now serialized in XML and contains fields that comply with the XMP Dublin Core.
+
 ## 0.7.0
 
 **Format Version:** 0 \

@@ -13,37 +13,15 @@ use crc32fast::Hasher;
 use crate::{
     color::{ColorProfileDesc, ColorType},
     error::{AlohaError, AlohaResult},
+    metadata::Metadata,
 };
 
 pub mod color;
 pub mod error;
+pub mod metadata;
 
 const MAGIC: &[u8; 5] = b"ALOHA";
 const VERSION: u16 = 0;
-
-/// Optional metadata associated with an [`AlohaImage`].
-///
-/// This metadata is serialized as JSON within the `.aloha` container.
-/// All fields are optional and omitted from the serialized output when `None`.
-#[non_exhaustive]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct Metadata {
-    /// The name or identifier of the image author, if available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
-    ///A description of the image source or origin, if available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-}
-
-impl Metadata {
-    pub fn from_source(src: impl ToString) -> Self {
-        Self {
-            author: None,
-            source: Some(src.to_string()),
-        }
-    }
-}
 
 /// A fully decoded in-memory representation of an `.aloha` image.
 ///
@@ -144,9 +122,10 @@ impl AlohaImage {
     ///
     /// The following invariants are checked:
     ///
+    /// - Width and height are both non-zero.
     /// - `Indexed` and `IndexedAlpha` color types have a palette and a bit
     ///   depth of at most 8.
-    /// - Width and height are both non-zero.
+    /// - Image's color profile descriptor does not match the actual one.
     /// - The length of `data` matches `width * height * bytes_per_pixel()`.
     /// - If a gain map is present, its dimensions and data length are valid,
     ///   and its metadata passes validation
@@ -155,6 +134,13 @@ impl AlohaImage {
     ///
     /// Returns an [`AlohaError::ValidationError`] if any of the above checks fail.
     pub fn validate(&self) -> AlohaResult {
+        if self.width < 1 || self.height < 1 {
+            return Err(AlohaError::ValidationError(format!(
+                "invalid image resolution: {}x{}",
+                self.width, self.height
+            )));
+        }
+
         if self.color_type.is_indexed() {
             if self.palette.is_none() {
                 return Err(AlohaError::ValidationError(
@@ -167,20 +153,45 @@ impl AlohaImage {
                     "the transparency palette not found".to_owned(),
                 ));
             }
+
+            if self.bit_depth > 8 {
+                return Err(AlohaError::ValidationError(format!(
+                    "invalid bit depth for indexed color type: {}",
+                    self.bit_depth as u8
+                )));
+            }
         }
 
-        if self.color_type.is_indexed() && self.bit_depth > 8 {
-            return Err(AlohaError::ValidationError(format!(
-                "invalid bit depth for indexed color type: {}",
-                self.bit_depth as u8
-            )));
+        if matches!(self.color_profile_desc, ColorProfileDesc::Cicp) {
+            if self.icc_profile.is_some() {
+                return Err(AlohaError::ValidationError(
+                    "Image uses the CICP but the ICC profile isn't empty".to_owned(),
+                ));
+            }
         }
 
-        if self.width < 1 || self.height < 1 {
-            return Err(AlohaError::ValidationError(format!(
-                "invalid image resolution: {}x{}",
-                self.width, self.height
-            )));
+        if matches!(self.color_profile_desc, ColorProfileDesc::Icc) {
+            if self.cicp.is_some() {
+                return Err(AlohaError::ValidationError(
+                    "Image uses the ICC profile but the CICP isn't empty".to_owned(),
+                ));
+            }
+        }
+
+        if matches!(self.color_profile_desc, ColorProfileDesc::None) {
+            if self.cicp.is_some() {
+                return Err(AlohaError::ValidationError(
+                    "Image does not use any color profile descriptor but the CICP isn't empty"
+                        .to_owned(),
+                ));
+            }
+
+            if self.icc_profile.is_some() {
+                return Err(AlohaError::ValidationError(
+                    "Image does not use any color profile descriptor but the ICC profile isn't empty"
+                        .to_owned()
+                ));
+            }
         }
 
         let actual_size = self.data.len();
@@ -353,13 +364,14 @@ impl AlohaImage {
         }
 
         // Writing the metadata section
-        let meta_json = serde_json::to_vec(&self.metadata)?;
+        let meta_xmp = self.metadata.to_xmp()?;
+        let meta_bytes = meta_xmp.as_bytes();
         write_bytes(
-            &(meta_json.len() as u32).to_le_bytes(),
+            &(meta_bytes.len() as u32).to_le_bytes(),
             &mut writer,
             &mut hasher,
         )?;
-        write_bytes(&meta_json, &mut writer, &mut hasher)?;
+        write_bytes(&meta_bytes, &mut writer, &mut hasher)?;
 
         // Writing the compressed pixel data section
         let compressed = match self.compression {
@@ -588,7 +600,9 @@ impl AlohaImage {
         reader.read_exact(&mut meta_bytes)?;
         hasher.update(&meta_bytes);
 
-        let metadata = serde_json::from_slice::<Metadata>(&meta_bytes)?;
+        let xmp_str = std::str::from_utf8(&meta_bytes)
+            .map_err(|e| AlohaError::InvalidMetadata(e.to_string()))?;
+        let metadata = Metadata::from_xmp(xmp_str)?;
 
         // Reading the compressed data section
         let data_len = read_u64(&mut reader, &mut hasher)?;

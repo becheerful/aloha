@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::File,
     io::{BufReader, BufWriter},
     path::Path,
@@ -7,8 +8,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use aloha_core::{
-    AlohaImage, Metadata,
+    AlohaImage,
     color::{ColorProfileDesc, ColorType},
+    metadata::Metadata,
 };
 
 mod png_conv {
@@ -182,6 +184,16 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         .unzip();
     }
 
+    let mut title = HashMap::new();
+    title.insert(
+        "en".to_owned(),
+        png_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_owned(),
+    );
+
     let image = AlohaImage::new(
         width,
         height,
@@ -193,13 +205,23 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         },
         1,
         aloha_cicp,
-        icc_profile,
+        if aloha_cicp.is_none() {
+            icc_profile
+        } else {
+            None
+        },
         palette,
         transparency_palette,
-        Metadata::from_source(format!(
-            "Converted from {}",
-            png_path.to_str().unwrap_or("<NOT FOUND>")
-        )),
+        Metadata::new()
+            .set_title(title)
+            .set_date_now()
+            .set_source(format!(
+                "Converted from {}",
+                png_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("<NOT FOUND>")
+            )),
         data,
         gain_map_metadata,
         gain_map,
@@ -333,6 +355,16 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 .context("Image must have a gain map metadata but it's absent")?
                 .to_owned();
 
+            let mut title = HashMap::new();
+            title.insert(
+                "en".to_owned(),
+                jpeg_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_owned(),
+            );
+
             let image = AlohaImage::new(
                 sdr_info.width as u32,
                 sdr_info.height as u32,
@@ -343,10 +375,16 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 icc_profile,
                 None,
                 None,
-                Metadata::from_source(format!(
-                    "Converted from {}",
-                    jpeg_path.to_str().unwrap_or("<NOT FOUND>")
-                )),
+                Metadata::new()
+                    .set_title(title)
+                    .set_date_now()
+                    .set_source(format!(
+                        "Converted from {}",
+                        jpeg_path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("<NOT FOUND>")
+                    )),
                 sdr_data,
                 Some(gmmd),
                 Some(gm),
@@ -367,6 +405,16 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
 
     let icc_profile = reader.icc_profile();
 
+    let mut title = HashMap::new();
+    title.insert(
+        "en".to_owned(),
+        jpeg_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_owned(),
+    );
+
     let image = AlohaImage::new(
         info.width as u32,
         info.height as u32,
@@ -377,10 +425,16 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
         icc_profile,
         None,
         None,
-        Metadata::from_source(format!(
-            "Converted from {}",
-            jpeg_path.to_str().unwrap_or("<NOT FOUND>")
-        )),
+        Metadata::new()
+            .set_title(title)
+            .set_date_now()
+            .set_source(format!(
+                "Converted from {}",
+                jpeg_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("<NOT FOUND>")
+            )),
         data,
         None,
         None,
