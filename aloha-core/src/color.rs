@@ -26,7 +26,9 @@ impl TryFrom<u8> for ColorProfileDesc {
             0 => Self::None,
             1 => Self::Cicp,
             2 => Self::Icc,
-            _ => return Err(AlohaError::InvalidColorProfileDesc(value)),
+            _ => Err(AlohaError::DecodingError(format!(
+                "invalid color profile's descriptor: {value}"
+            )))?,
         })
     }
 }
@@ -64,7 +66,9 @@ impl ColorType {
             2 => Self::GrayscaleAlpha,
             3 => Self::Rgb,
             4 => Self::Rgba,
-            _ => return Err(AlohaError::InvalidChannelsCount(channels)),
+            _ => Err(AlohaError::DecodingError(format!(
+                "invalid channels count: {channels}"
+            )))?,
         })
     }
 
@@ -100,12 +104,9 @@ impl TryFrom<u8> for ColorType {
             3 => Self::Rgba,
             4 => Self::Indexed,
             5 => Self::IndexedAlpha,
-            _ => return Err(AlohaError::InvalidColorType(value)),
+            _ => Err(AlohaError::DecodingError(format!(
+                "invalid color type: {value}"
+            )))?,
         })
     }
-}
-
-/// Returns a bitmask for extracting a single sample from a packed pixel value.
-pub(crate) fn get_sample_mask(bit_depth: u8) -> u16 {
-    if bit_depth == 8 { 0xFF } else { 0xFFFF }
 }

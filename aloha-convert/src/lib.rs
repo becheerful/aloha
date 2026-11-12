@@ -203,7 +203,7 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
             Sixteen => 16,
             _ => bail!("Unsupported bit depth: {}", bit_depth as u8),
         },
-        1,
+        aloha_core::Compression::DeltaZstd,
         aloha_cicp,
         if aloha_cicp.is_none() {
             icc_profile
@@ -370,7 +370,7 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 sdr_info.height as u32,
                 jpeg_conv::pixel_format_to_aloha(&sdr_info.pixel_format)?,
                 jpeg_conv::bit_depth_to_aloha(&sdr_info.pixel_format)?,
-                1,
+                aloha_core::Compression::DeltaZstd,
                 None,
                 icc_profile,
                 None,
@@ -420,7 +420,7 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
         info.height as u32,
         jpeg_conv::pixel_format_to_aloha(&info.pixel_format)?,
         jpeg_conv::bit_depth_to_aloha(&info.pixel_format)?,
-        1,
+        aloha_core::Compression::DeltaZstd,
         None,
         icc_profile,
         None,

@@ -12,16 +12,41 @@ use crc32fast::Hasher;
 
 use crate::{
     color::{ColorProfileDesc, ColorType},
+    delta::{delta_decode, delta_encode},
     error::{AlohaError, AlohaResult},
     metadata::Metadata,
 };
 
 pub mod color;
+pub mod delta;
 pub mod error;
 pub mod metadata;
 
 const MAGIC: &[u8; 5] = b"ALOHA";
 const VERSION: u16 = 0;
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub enum Compression {
+    None,
+    DeltaZlib,
+    DeltaZstd,
+}
+
+impl TryFrom<u8> for Compression {
+    type Error = AlohaError;
+
+    fn try_from(value: u8) -> AlohaResult<Self> {
+        Ok(match value {
+            0 => Self::None,
+            1 => Self::DeltaZlib,
+            2 => Self::DeltaZstd,
+            _ => Err(AlohaError::DecodingError(format!(
+                "invalid compression algorithm: {value}"
+            )))?,
+        })
+    }
+}
 
 /// A fully decoded in-memory representation of an `.aloha` image.
 ///
@@ -45,10 +70,7 @@ pub struct AlohaImage {
     /// Describes which color profile representation is used (`CICP`, `ICC` or none).
     pub color_profile_desc: ColorProfileDesc,
     /// The compression algorithm applied to the pixel data.
-    ///
-    /// - `0` — no compression (raw bytes)
-    /// - `1` — delta encoding followed by zlib compression
-    pub compression: u8,
+    pub compression: Compression,
     /// Whether the image contains an optional gain map.
     pub has_gain_map: bool,
     /// The CICP color profile, required when `color_profile_desc` is [`ColorProfileDesc::Cicp`].
@@ -80,7 +102,7 @@ impl AlohaImage {
         height: u32,
         color_type: ColorType,
         bit_depth: u8,
-        compression: u8,
+        compression: Compression,
         cicp: Option<zencodec::Cicp>,
         icc_profile: Option<Vec<u8>>,
         palette: Option<Vec<u8>>,
@@ -144,7 +166,7 @@ impl AlohaImage {
         if self.color_type.is_indexed() {
             if self.palette.is_none() {
                 return Err(AlohaError::ValidationError(
-                    "the palette not found".to_owned(),
+                    "the color palette not found".to_owned(),
                 ));
             }
 
@@ -165,7 +187,7 @@ impl AlohaImage {
         if matches!(self.color_profile_desc, ColorProfileDesc::Cicp) {
             if self.icc_profile.is_some() {
                 return Err(AlohaError::ValidationError(
-                    "Image uses the CICP but the ICC profile isn't empty".to_owned(),
+                    "image uses the CICP but the ICC profile isn't empty".to_owned(),
                 ));
             }
         }
@@ -173,7 +195,7 @@ impl AlohaImage {
         if matches!(self.color_profile_desc, ColorProfileDesc::Icc) {
             if self.cicp.is_some() {
                 return Err(AlohaError::ValidationError(
-                    "Image uses the ICC profile but the CICP isn't empty".to_owned(),
+                    "image uses the ICC profile but the CICP isn't empty".to_owned(),
                 ));
             }
         }
@@ -181,21 +203,24 @@ impl AlohaImage {
         if matches!(self.color_profile_desc, ColorProfileDesc::None) {
             if self.cicp.is_some() {
                 return Err(AlohaError::ValidationError(
-                    "Image does not use any color profile descriptor but the CICP isn't empty"
+                    "image does not use any color profile descriptor but the CICP isn't empty"
                         .to_owned(),
                 ));
             }
 
             if self.icc_profile.is_some() {
                 return Err(AlohaError::ValidationError(
-                    "Image does not use any color profile descriptor but the ICC profile isn't empty"
+                    "image does not use any color profile descriptor but the ICC profile isn't empty"
                         .to_owned()
                 ));
             }
         }
 
         let actual_size = self.data.len();
-        let expected_size = self.width as usize * self.height as usize * self.bytes_per_pixel();
+        let expected_size = self.width as usize
+            * self.height as usize
+            * (self.bit_depth as usize / 8)
+            * self.color_type.channels();
         if actual_size != expected_size {
             return Err(AlohaError::ValidationError(format!(
                 "the image's data size {actual_size} does not match the expected {expected_size}"
@@ -225,55 +250,6 @@ impl AlohaImage {
         }
 
         Ok(())
-    }
-
-    /// Returns the number of bytes required to store a single pixel.
-    pub fn bytes_per_pixel(&self) -> usize {
-        (self.bit_depth as usize / 8) * self.color_type.channels()
-    }
-
-    /// Reads a single color sample from `data` at the given sample index.
-    ///
-    /// The sample is interpreted as a little-endian unsigned integer and widened
-    /// to `u16`. Only 1-byte and 2-byte samples are supported
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AlohaError::InvalidBytesPerSample`] if `bytes_per_sample` is neither 1 nor 2.
-    pub fn read_sample(
-        bytes_per_sample: usize,
-        data: &[u8],
-        sample_index: usize,
-    ) -> AlohaResult<u16> {
-        let off = sample_index * bytes_per_sample as usize;
-        Ok(match bytes_per_sample {
-            1 => data[off] as u16,
-            2 => u16::from_le_bytes([data[off], data[off + 1]]),
-            _ => return Err(AlohaError::InvalidBytesPerSample(bytes_per_sample)),
-        })
-    }
-
-    /// Writes a `u16` value as a little-endian sample into `data`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AlohaError::InvalidBytesPerSample`] if `bytes_per_sample` is neither 1 nor 2.
-    pub fn write_sample(
-        bytes_per_sample: usize,
-        data: &mut [u8],
-        sample_index: usize,
-        value: u16,
-    ) -> AlohaResult {
-        let off = sample_index * bytes_per_sample as usize;
-        Ok(match bytes_per_sample {
-            1 => data[off] = value as u8,
-            2 => {
-                let b = value.to_le_bytes();
-                data[off] = b[0];
-                data[off + 1] = b[1];
-            }
-            _ => return Err(AlohaError::InvalidBytesPerSample(bytes_per_sample)),
-        })
     }
 
     /// Encodes an `AlohaImage` to the `.aloha` binary format and writes it to the
@@ -309,7 +285,7 @@ impl AlohaImage {
                 self.color_type as u8,
                 self.bit_depth,
                 self.color_profile_desc as u8,
-                self.compression,
+                self.compression as u8,
                 self.has_gain_map as u8,
             ],
             &mut writer,
@@ -319,7 +295,9 @@ impl AlohaImage {
         // Writing the CICP section
         if matches!(self.color_profile_desc, ColorProfileDesc::Cicp) {
             let Some(cicp) = &self.cicp else {
-                return Err(AlohaError::CicpNotFound);
+                return Err(AlohaError::EncodingError(
+                    "image must have coding-independent code points but they're absent".to_owned(),
+                ));
             };
 
             write_bytes(
@@ -337,7 +315,9 @@ impl AlohaImage {
         // Writing the ICC profile section
         if matches!(self.color_profile_desc, ColorProfileDesc::Icc) {
             let Some(icc) = &self.icc_profile else {
-                return Err(AlohaError::IccNotFound);
+                return Err(AlohaError::EncodingError(
+                    "image must have an ICC profile but it's absent".to_owned(),
+                ));
             };
 
             write_bytes(&(icc.len() as u32).to_le_bytes(), &mut writer, &mut hasher)?;
@@ -347,7 +327,9 @@ impl AlohaImage {
         // Writing the palette section
         if self.color_type.is_indexed() {
             let Some(p) = &self.palette else {
-                return Err(AlohaError::PaletteNotFound("color".to_owned()));
+                return Err(AlohaError::EncodingError(
+                    "image must have a color palette but it's absent".to_owned(),
+                ));
             };
 
             write_bytes(&(p.len() as u16).to_le_bytes(), &mut writer, &mut hasher)?;
@@ -355,7 +337,9 @@ impl AlohaImage {
 
             if self.color_type.has_alpha() {
                 let Some(tp) = &self.transparency_palette else {
-                    return Err(AlohaError::PaletteNotFound("transparency".to_owned()));
+                    return Err(AlohaError::EncodingError(
+                        "image must have a transparency palette but it's absent".to_owned(),
+                    ));
                 };
 
                 write_bytes(&[tp.len() as u8], &mut writer, &mut hasher)?;
@@ -375,22 +359,32 @@ impl AlohaImage {
 
         // Writing the compressed pixel data section
         let compressed = match self.compression {
-            0 => self.data.clone(),
-            1 => {
+            Compression::None => self.data.clone(),
+            Compression::DeltaZlib => {
                 let filtered = delta_encode(
                     &self.data,
                     self.width as usize,
                     self.height as usize,
                     &self.color_type,
                     self.bit_depth,
-                )?;
+                );
                 let mut enc =
                     flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
                 enc.write_all(&filtered)?;
-                let compressed = enc.finish()?;
-                compressed
+                enc.finish()?
             }
-            other => return Err(AlohaError::InvalidCompressionAlgorithm(other)),
+            Compression::DeltaZstd => {
+                let filtered = delta_encode(
+                    &self.data,
+                    self.width as usize,
+                    self.height as usize,
+                    &self.color_type,
+                    self.bit_depth,
+                );
+                let mut enc = zstd::Encoder::new(Vec::new(), 6)?;
+                enc.write_all(&filtered)?;
+                enc.finish()?
+            }
         };
 
         write_bytes(
@@ -403,7 +397,9 @@ impl AlohaImage {
         if self.has_gain_map {
             // Writing the gain map metadata section
             let Some(gain_map_params) = &self.gain_map_metadata else {
-                return Err(AlohaError::GainMapMetadataNotFound);
+                return Err(AlohaError::EncodingError(
+                    "image must have a gain map metadata but it's absent".to_owned(),
+                ));
             };
 
             for i in 0..3 {
@@ -455,7 +451,9 @@ impl AlohaImage {
 
             // Writing the gain map section
             let Some(gain_map) = &self.gain_map else {
-                return Err(AlohaError::GainMapNotFound);
+                return Err(AlohaError::EncodingError(
+                    "image must have a gain map but it's absent".to_owned(),
+                ));
             };
 
             let filtered = delta_encode(
@@ -464,7 +462,7 @@ impl AlohaImage {
                 gain_map.height as usize,
                 &ColorType::from_channels_count(gain_map.channels as usize)?,
                 8, // bit depth for gain map is always 8
-            )?;
+            );
 
             let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
             enc.write_all(&filtered)?;
@@ -533,7 +531,7 @@ impl AlohaImage {
         let color_type = ColorType::try_from(buf[0])?;
         let bit_depth = buf[1];
         let color_profile_desc = ColorProfileDesc::try_from(buf[2])?;
-        let compression = buf[3];
+        let compression = Compression::try_from(buf[3])?;
         let has_gain_map = buf[4] != 0;
 
         // Reading the CICP section
@@ -601,7 +599,7 @@ impl AlohaImage {
         hasher.update(&meta_bytes);
 
         let xmp_str = std::str::from_utf8(&meta_bytes)
-            .map_err(|e| AlohaError::InvalidMetadata(e.to_string()))?;
+            .map_err(|e| AlohaError::DecodingError(e.to_string()))?;
         let metadata = Metadata::from_xmp(xmp_str)?;
 
         // Reading the compressed data section
@@ -612,8 +610,8 @@ impl AlohaImage {
         hasher.update(&pixels_bytes);
 
         let data = match compression {
-            0 => pixels_bytes,
-            1 => {
+            Compression::None => pixels_bytes,
+            Compression::DeltaZlib => {
                 let mut dec = flate2::read::ZlibDecoder::new(pixels_bytes.as_slice());
                 let mut filtered = Vec::new();
                 dec.read_to_end(&mut filtered)?;
@@ -625,7 +623,18 @@ impl AlohaImage {
                     bit_depth,
                 )?
             }
-            _ => return Err(AlohaError::InvalidCompressionAlgorithm(compression)),
+            Compression::DeltaZstd => {
+                let mut dec = zstd::Decoder::new(pixels_bytes.as_slice())?;
+                let mut filtered = Vec::new();
+                dec.read_to_end(&mut filtered)?;
+                delta_decode(
+                    &filtered,
+                    width as usize,
+                    height as usize,
+                    &color_type,
+                    bit_depth,
+                )?
+            }
         };
 
         // Reading the gain map section
@@ -798,88 +807,6 @@ impl AlohaImage {
             _ => {}
         }
     }
-}
-
-/// Applies delta encoding to `data` in-place and returns the encoded bytes.
-///
-/// For each channel, the first sample is stored as-is, and every subsequent
-/// sample is replaced by the wrapping difference from the previous sample in the
-/// same channel. `Indexed` and `IndexedAlpha` color types are returned unchanged.
-///
-/// # Errors
-///
-/// Propagates errors from [`AlohaImage::read_sample`] and [`AlohaImage::write_sample`].
-fn delta_encode(
-    data: &[u8],
-    width: usize,
-    height: usize,
-    color_type: &ColorType,
-    bit_depth: u8,
-) -> AlohaResult<Vec<u8>> {
-    if color_type.is_indexed() {
-        return Ok(data.to_vec());
-    }
-
-    let channels = color_type.channels();
-    let bytes_per_sample = bit_depth as usize / 8;
-    let mask = color::get_sample_mask(bit_depth);
-    let mut out = vec![0u8; data.len()];
-
-    for y in 0..height as usize {
-        let mut prev = vec![0u16; channels];
-        for x in 0..width as usize {
-            for c in 0..channels {
-                let s = (y * width as usize + x) * channels + c;
-                let v = AlohaImage::read_sample(bytes_per_sample, data, s)?;
-                let d = v.wrapping_sub(prev[c]) & mask;
-                AlohaImage::write_sample(bytes_per_sample, &mut out, s, d)?;
-                prev[c] = v;
-            }
-        }
-    }
-
-    Ok(out)
-}
-
-/// Reverses the delta encoding applied by [`delta_decode`].
-///
-/// Each sample is reconstructed by wrapping-adding the delta value to the
-/// previous sample in the same channel. `Indexed` and `IndexedAlpha` color types
-/// are returned unchanged.
-///
-/// # Errors
-///
-/// Propagates errors from [`AlohaImage::read_sample`] and [`AlohaImage::write_sample`].
-fn delta_decode(
-    data: &[u8],
-    width: usize,
-    height: usize,
-    color_type: &ColorType,
-    bit_depth: u8,
-) -> AlohaResult<Vec<u8>> {
-    if color_type.is_indexed() {
-        return Ok(data.to_vec());
-    }
-
-    let channels = color_type.channels();
-    let bytes_per_sample = bit_depth as usize / 8;
-    let mask = crate::color::get_sample_mask(bit_depth);
-    let mut out = vec![0u8; data.len()];
-
-    for y in 0..height as usize {
-        let mut prev = vec![0u16; channels];
-        for x in 0..width as usize {
-            for c in 0..channels {
-                let s = (y * width as usize + x) * channels + c;
-                let d = AlohaImage::read_sample(bytes_per_sample, data, s)?;
-                let v = (prev[c].wrapping_add(d)) & mask;
-                AlohaImage::write_sample(bytes_per_sample, &mut out, s, v)?;
-                prev[c] = v;
-            }
-        }
-    }
-
-    Ok(out)
 }
 
 fn write_bytes(bytes: &[u8], w: &mut impl Write, hasher: &mut Hasher) -> AlohaResult {

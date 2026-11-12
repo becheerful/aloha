@@ -77,6 +77,8 @@ impl AlohaViewer {
                     self.image_info = Some(utils::ImageInfo {
                         width: image.width,
                         height: image.height,
+                        color_type: image.color_type,
+                        bit_depth: image.bit_depth,
                     });
                     self.file_name = path
                         .file_stem()
@@ -185,6 +187,14 @@ impl AlohaViewer {
 
                                 ui.label(t!("height", locale = self.locale));
                                 ui.label(format!("{}", image_info.height));
+                                ui.end_row();
+
+                                ui.label(t!("color-type", locale = self.locale));
+                                ui.label(format!("{:?}", image_info.color_type));
+                                ui.end_row();
+
+                                ui.label(t!("bit-depth", locale = self.locale));
+                                ui.label(format!("{}", image_info.bit_depth));
                                 ui.end_row();
 
                                 if let Some(title) = &metadata.title {
@@ -417,7 +427,9 @@ impl eframe::App for AlohaViewer {
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(texture) = &self.texture {
+            if let Some(error) = &self.error {
+                ui.colored_label(egui::Color32::RED, error);
+            } else if let Some(texture) = &self.texture {
                 let avail = ui.available_size();
                 let size = texture.size_vec2();
 
@@ -431,10 +443,6 @@ impl eframe::App for AlohaViewer {
                     ui.add(egui::Image::new(texture).fit_to_exact_size(size * scale));
                 });
                 self.zoom = scale;
-            }
-
-            if let Some(error) = &self.error {
-                ui.colored_label(egui::Color32::RED, error);
             }
         });
 

@@ -3,6 +3,8 @@ use xmpkit::XmpValue;
 pub struct ImageInfo {
     pub width: u32,
     pub height: u32,
+    pub color_type: aloha_core::color::ColorType,
+    pub bit_depth: u8,
 }
 
 pub fn xmp_value_to_string(value: &XmpValue) -> String {
@@ -31,9 +33,11 @@ pub fn xmp_value_to_string(value: &XmpValue) -> String {
     }
 }
 
-pub fn aloha_to_rgba8(image: &mut aloha_core::AlohaImage) -> Result<Vec<u8>, String> {
-    image.reduce_bit_depth();
+fn to8(v: u16, bps: usize) -> u8 {
+    if bps == 1 { v as u8 } else { (v / 256) as u8 }
+}
 
+pub fn aloha_to_rgba8(image: &aloha_core::AlohaImage) -> Result<Vec<u8>, String> {
     let w = image.width as usize;
     let h = image.height as usize;
     let pixels = w * h;
@@ -75,34 +79,48 @@ pub fn aloha_to_rgba8(image: &mut aloha_core::AlohaImage) -> Result<Vec<u8>, Str
         return Ok(out);
     }
 
+    let channels = image.color_type.channels();
+    let bps = image.bit_depth as usize / 8;
+
     for i in 0..pixels {
+        let mut samples = [0u16; 4];
+        for c in 0..channels {
+            let s = i * channels + c;
+            samples[c] = if bps == 1 {
+                image.data[s] as u16
+            } else {
+                let off = s * 2;
+                u16::from_be_bytes([image.data[off], image.data[off + 1]])
+            };
+        }
+
         use aloha_core::color::ColorType::*;
         match image.color_type {
             Grayscale => {
-                let g = image.data[i];
+                let g = to8(samples[0], bps);
                 out.extend_from_slice(&[g, g, g, 255]);
             }
 
             GrayscaleAlpha => {
-                let g = image.data[i * 2];
-                out.extend_from_slice(&[g, g, g, image.data[i * 2 + 1]]);
+                let g = to8(samples[0], bps);
+                out.extend_from_slice(&[g, g, g, to8(samples[1], bps)]);
             }
 
             Rgb => {
                 out.extend_from_slice(&[
-                    image.data[i * 3],
-                    image.data[i * 3 + 1],
-                    image.data[i * 3 + 2],
+                    to8(samples[0], bps),
+                    to8(samples[1], bps),
+                    to8(samples[2], bps),
                     255,
                 ]);
             }
 
             Rgba => {
                 out.extend_from_slice(&[
-                    image.data[i * 4],
-                    image.data[i * 4 + 1],
-                    image.data[i * 4 + 2],
-                    image.data[i * 4 + 3],
+                    to8(samples[0], bps),
+                    to8(samples[1], bps),
+                    to8(samples[2], bps),
+                    to8(samples[3], bps),
                 ]);
             }
 
