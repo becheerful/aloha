@@ -89,12 +89,13 @@ Values `3`—`255` are invalid and MUST be rejected.
 
 An 8-bit unsigned integer that represents the pixel data compression algotithm being used.
 
-| Value | Algorithm    | Description                                         |
-|-------|--------------|-----------------------------------------------------|
-| 0     | None         | No compression.                                     |
-| 1     | Delta + zlib | Horizontal delta coding followed by zlib (DEFLATE). |
+| Value | Algorithm    | Description                                                                   |
+|-------|--------------|-------------------------------------------------------------------------------|
+| 0     | None         | No compression.                                                               |
+| 1     | Delta + zlib | Adaptive line-by-line PNG-like delta, followed by zlib (DELFATE) compression. |
+| 2     | Delta + zstd | Adaptive line-by-line PNG-like delta, followed by zstd compression.           |
 
-Values `2`—`255` are invalid and MUST be rejected.
+Values `3`—`255` are invalid and MUST be rejected.
 
 ## 5. CICP section
 
@@ -192,65 +193,60 @@ reffered to below as `sample_mask`.
 
 ### 10.2 Delta coding
 
-Delta coding is applied when `compression` is `1` **and** `color_type` is not `4` (`Indexed`).
-For `Indexed` images the pixel buffer is stored unchanged, with no delta coding, regardless of
-`compression`.
+Delta coding is applied when `compression` is greater than `0` **and** `color_type` is not `4`
+(`Indexed`) or `5` (`IndexedAlpha`). For indexed images the pixel buffer is stored unchanged,
+with no delta coding, regardless of `compression`.
 
-For non-`Indexed` images, delta coding is applied **per row**, with per-channel state that
-resets to zero at the start of every row:
+For non-indexed images, delta coding is applied **per row**. Each row is coded independently
+using one of the following filter types (adapted from the PNG specification):
 
-```text
-# pseudocode
+| Value | Filter  | Description                                                                                                                        |
+|-------|---------|------------------------------------------------------------------------------------------------------------------------------------|
+| 0     | None    | The row is stored as-is.                                                                                                           |
+| 1     | Left    | Each byte is replaced by the difference from the corresponding byte of the previous pixel (to the left).                           |
+| 2     | Top     | Each byte is replaced by the difference from the corresponding byte of the pixel directly above (same column in the previous row). |
+| 3     | Average | Each byte is replaced by the difference from the average of the left and above pixels (rounded down).                              |
+| 4     | Paeth   | Each byte is replaced by the difference from the Paeth predictor (a linear combination of left, above, and upper-left pixels).     |
 
-out = [0; data.len()]
-for y in 0..height:
-    prev[c] = 0
-    for x in 0..width:
-        for c in 0..channels:
-            v = read_sample(data, (y * width + x) * channels + c)
-            d = (v - prev[c]) mod 2^bit_depth
-            write_sample(out, (y * width + x) * channels + c, d)
-            prev[c] = v
-```
+For the first pixel of a row, the "left" value is treated as zero. For the first row, the "above"
+and "upper-left" values are treated as zero.
 
-The substraction is performed modulo `2^bit_depth`. In the reference implementation this is
-`v.wrapping_sub(prev[c]) & sample_mask`, whice yields the same result because both `v` and
-`prev[c]` are already in `[0, 2^bit_depth - 1]`.
-
-Decoding reverses this with a cumulative sum per channel, again resetting `prev` to zero
-at the start of each row:
+The encoder MUST select the filter that yields the smallest sum of absolute values of the encoded
+bytes for each row. The selected filter type is stored as a single byte preceding the encoded row
+data. Therefore, the encoded output has the following layout:
 
 ```text
-# pseudocode
-
-out = [0; data.len()]
-for y in 0..height:
-    prev[c] = 0
-    for x in 0..width:
-        for c in 0..channels:
-            d = read_sample(data, (y * width + x) * channels + c)
-            v = (prev[c] + d) mod 2^bit_depth
-            write_sample(out, (y * width + x) * channels + c, v)
-            prev[c] = v
+for each row y in 0..height:
+  filter_type[y] (1 byte)
+  filtered_row[y] (width * bytes per pixel)
 ```
 
-The addition is performed modulo `2^bit_depth`; in the reference implementation this is
-`(prev[c].wrapping_add(d)) & sample_mask`.
+Bytes per pixel are calculated as `(bit_depth / 8) * channels`.
 
-Because `prev` is initialized to zero, the first pixel of each row is stored with its raw
-sample values as the differences (`(v - 0) mod 2^bit_depth == v`). This is not a special case
-in the algorithm — it falls out of the per-row reset.
+Decoding reverses the encoding process:
 
-If `compression` is `0`, or if `color_type` is `4` (`Indexed`), no delta coding is applied and
-`out` equals `data` for the pixel section.
+```text
+for each row y in 0..height:
+  read filter_type
+  for each byte in the filtered row:
+    reconstruct the original byte using the inverse of the selected filter
+    (the left, above, and upper-left values are taken from the already reconstructed current row and the fully reconstructed previous row)
+```
+
+For indexed images (`color_type` is `4` or `5`), no coding is applied and the pixel data is stored
+as-is, regardless of `compression`.
+
+If `compression` is `0`, no coding is applied and the pixel section contains the raw pixel data.
 
 ### 10.3 Compression
+
+When `compression` is `0`, the pixel data is stored raw.
 
 When `compression` is `1`, the (possibly delta-coded) pixel buffer is compressed with DEFLATE
 as produced by zlib, i.e. the same algorthm exposed by `flate2`'s `ZlibEncoder` / `ZlibDecoder`
 with `Compression::best()`. No preset dictionary is used. The zlib header MUST be present.
 
-When `compression` is `0`, the pixel data is stored raw.
+When `compression` is `2`, the (possibly delta-coded) pixel buffer is compressed with zstd.
 
 ## 11. Gain Map Metadata Section
 
@@ -262,16 +258,17 @@ and `alternate_offset`, followed by scalar values for `base_hdr_headroom`, `alte
 and boolean flags `use_base_color_space` and `backward_direction`. All floating-point values are `f64`,
 **litle-endian**.
 
-| Size  | Field                  | Description                             |
-|-------|------------------------|-----------------------------------------|
-| 8 * 3 | `gain_map_max[3]`      | Maximum gain values per channel, `f64`. |
-| 8 * 3 | `gain_map_min[3]`      | Minimum gain values per channel, `f64`. |
-| 8 * 3 | `gamma[3]`             | Gamma values per channel, `f64`.        |
-| 8 * 3 | `base_offset[3]`       | Base offsets per channel, `f64`.        |
-| 8 * 3 | `alternate_offset[3]`  | Alternate offsets per channel, `f64`.   |
-| 8     | `base_hdr_headroom`    | Base HDR headroom, `f64`.               |
-| 1     | `use_base_color_space` | `0` = false, `1` = true.                |
-| 1     | `backward_direction`   | `0` = false, `1` = true.                |
+| Size  | Field                    | Description                             |
+|-------|--------------------------|-----------------------------------------|
+| 8 * 3 | `gain_map_max[3]`        | Maximum gain values per channel, `f64`. |
+| 8 * 3 | `gain_map_min[3]`        | Minimum gain values per channel, `f64`. |
+| 8 * 3 | `gamma[3]`               | Gamma values per channel, `f64`.        |
+| 8 * 3 | `base_offset[3]`         | Base offsets per channel, `f64`.        |
+| 8 * 3 | `alternate_offset[3]`    | Alternate offsets per channel, `f64`.   |
+| 8     | `base_hdr_headroom`      | Base HDR headroom, `f64`.               |
+| 8     | `alternate_hdr_headroom` | Alternate HDR headroom, `f64`.          |
+| 1     | `use_base_color_space`   | `0` = false, `1` = true.                |
+| 1     | `backward_direction`     | `0` = false, `1` = true.                |
 
 These fields correspond to the gain map metadata defined by the Ultra HDR specification.
 
@@ -292,7 +289,8 @@ The gain map pixel data is **always** 8-bit per channel and is processed as foll
 1. Delta encoding is applied per row (same algorithm as in [10.2](#102-delta-coding)), regardless of the
 main image's `compression` value.
 
-2. The delta-coded buffer is compressed with zlib (`flate2::Compression::best()`).
+2. The delta-coded buffer is compressed with zlib (`flate2::Compression::best()`), regardless of the main
+image's `compression` value.
 
 During decoding, the compressed data is first decompressed with zlib, then delta-decoded using the gain
 map's own `width`, `height`, and channel count (width `bit_depth` = `8`).

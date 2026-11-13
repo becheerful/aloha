@@ -88,6 +88,7 @@ fn choose_best_filter(row: &[u8], prev_row: &[u8], bpp: usize) -> Vec<u8> {
         DeltaFilter::None,
         DeltaFilter::Left,
         DeltaFilter::Top,
+        DeltaFilter::Average,
         DeltaFilter::Paeth,
     ] {
         let filtered = apply_filter(&filter, row, prev_row, bpp);
@@ -109,7 +110,7 @@ fn calc_prediction(filter: &DeltaFilter, a: u8, b: u8, c: u8) -> u8 {
         DeltaFilter::None => 0,
         DeltaFilter::Left => a,
         DeltaFilter::Top => b,
-        DeltaFilter::Average => (a + b) / 2,
+        DeltaFilter::Average => ((a as u16 + b as u16) / 2) as u8,
         DeltaFilter::Paeth => {
             let p = a as i16 + b as i16 - c as i16;
             let pa = (p - a as i16).abs();

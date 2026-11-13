@@ -85,6 +85,7 @@ impl AlohaViewer {
                         .and_then(|s| s.to_str())
                         .unwrap_or("?")
                         .to_owned();
+                    self.error = None;
                 }
 
                 Err(e) => {
