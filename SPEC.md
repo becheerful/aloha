@@ -2,7 +2,7 @@
 
 **Format version:** 0 \
 **Status:** Draft \
-**Last updated:** 2026-11-02
+**Last updated:** 2026-11-12
 
 ## 1. Overview
 

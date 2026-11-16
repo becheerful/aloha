@@ -216,13 +216,14 @@ dependencies = [
 
 [[package]]
 name = "aloha-viewer"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "aloha-convert",
  "aloha-core",
  "eframe",
  "rfd",
  "rust-i18n",
+ "sys-locale",
  "xmpkit",
 ]
 
@@ -3818,6 +3819,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
