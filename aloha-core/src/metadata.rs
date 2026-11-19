@@ -30,7 +30,7 @@ pub struct Metadata {
     /// Unique identifier of the resource, represented as a version 7 UUID.
     pub identifier: Option<XmpValue /* String */>,
     /// An unordered array specifying the languages used in the resource.
-    pub language: Option<XmpValue /* Array(String) */>,
+    pub languages: Option<XmpValue /* Array(String) */>,
     /// Publishers.
     pub publishers: Option<XmpValue /* Array(String) */>,
     /// Relationships to other documents.
@@ -117,7 +117,7 @@ impl Metadata {
     }
 
     pub fn set_language(mut self, value: &[impl Into<String> + Clone]) -> Self {
-        self.language = Some(XmpValue::Array(
+        self.languages = Some(XmpValue::Array(
             value
                 .iter()
                 .map(|s| XmpValue::String(s.clone().into()))
@@ -222,7 +222,7 @@ impl Metadata {
             meta.set_property(DC, "identifier", identifier.to_owned())?;
         }
 
-        if let Some(language) = &self.language {
+        if let Some(language) = &self.languages {
             meta.set_property(DC, "language", language.to_owned())?;
         }
 
@@ -267,7 +267,7 @@ impl Metadata {
         let description = meta.get_property(DC, "description");
         let format = meta.get_property(DC, "format");
         let identifier = meta.get_property(DC, "identifier");
-        let language = meta.get_property(DC, "language");
+        let languages = meta.get_property(DC, "language");
         let publishers = meta.get_property(DC, "publisher");
         let relations = meta.get_property(DC, "relation");
         let rights = meta.get_property(DC, "rights");
@@ -284,7 +284,7 @@ impl Metadata {
             description,
             format,
             identifier,
-            language,
+            languages,
             publishers,
             relations,
             rights,

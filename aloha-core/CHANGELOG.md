@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0
+
+**Format Version:** 0 \
+**Date:** 2026-11-18
+
+Now the CRC is computed for each section.
+
 ## 0.9.0
 
 **Format Version:** 0 \

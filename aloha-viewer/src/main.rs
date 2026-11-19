@@ -29,7 +29,7 @@ struct AlohaViewer {
 }
 
 impl AlohaViewer {
-    pub fn new(cc: &eframe::CreationContext) -> Self {
+    pub fn new(cc: &eframe::CreationContext, path: Option<String>) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
 
         let locale = sys_locale::get_locale().unwrap_or("en-US".to_owned());
@@ -38,7 +38,7 @@ impl AlohaViewer {
             locale: locale.clone(),
             file_name: t!("file-not-selected", locale = locale).into_owned(),
             texture: None,
-            image_path: None,
+            image_path: path.map(|s| std::path::PathBuf::from(s)),
             error: None,
             zoom: 1.0,
             auto_zoom: true,
@@ -271,9 +271,9 @@ impl AlohaViewer {
                                     ui.end_row();
                                 }
 
-                                if let Some(language) = &metadata.language {
-                                    ui.label(t!("language", locale = &self.locale));
-                                    ui.label(xmp_value_to_string(language));
+                                if let Some(languages) = &metadata.languages {
+                                    ui.label(t!("languages", locale = &self.locale));
+                                    ui.label(xmp_value_to_string(languages));
                                     ui.end_row();
                                 }
 
@@ -306,7 +306,7 @@ impl AlohaViewer {
                 .open(opened)
                 .show(ui, |ui| {
                     egui::Grid::new("settingsgrid").show(ui, |ui| {
-                        ui.label(t!("language", locale = &self.locale));
+                        ui.label(t!("interface-language", locale = &self.locale));
                         egui::ComboBox::from_id_salt("languagecombobox")
                             .selected_text(match self.locale.as_str() {
                                 "en-US" => "English",
@@ -510,20 +510,26 @@ impl eframe::App for AlohaViewer {
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(error) = &self.error {
                 ui.colored_label(egui::Color32::RED, error);
-            } else if let Some(texture) = &self.texture {
-                let avail = ui.available_size();
-                let size = texture.size_vec2();
+            } else {
+                if let Some(texture) = &self.texture {
+                    let avail = ui.available_size();
+                    let size = texture.size_vec2();
 
-                let scale = if self.auto_zoom {
-                    (avail.x / size.x).min(avail.y / size.y)
+                    let scale = if self.auto_zoom {
+                        (avail.x / size.x).min(avail.y / size.y)
+                    } else {
+                        self.zoom
+                    };
+
+                    ui.centered_and_justified(|ui| {
+                        ui.add(egui::Image::new(texture).fit_to_exact_size(size * scale));
+                    });
+                    self.zoom = scale;
                 } else {
-                    self.zoom
-                };
-
-                ui.centered_and_justified(|ui| {
-                    ui.add(egui::Image::new(texture).fit_to_exact_size(size * scale));
-                });
-                self.zoom = scale;
+                    if let Some(path) = self.image_path.clone() {
+                        self.load(ui, &path);
+                    }
+                }
             }
         });
 
@@ -538,12 +544,19 @@ impl eframe::App for AlohaViewer {
 }
 
 fn main() -> eframe::Result {
+    let mut path = None;
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 {
+        path = Some(args[1].clone());
+    }
+
     let mut options = eframe::NativeOptions::default();
     options.viewport.min_inner_size = Some(egui::Vec2::new(640.0, 480.0));
 
     eframe::run_native(
         "ALOHA Viewer",
         options,
-        Box::new(|cc| Ok(Box::new(AlohaViewer::new(cc)))),
+        Box::new(|cc| Ok(Box::new(AlohaViewer::new(cc, path)))),
     )
 }
