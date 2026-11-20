@@ -367,7 +367,7 @@ impl AlohaImage {
                     self.height as usize,
                     &self.color_type,
                     self.bit_depth,
-                );
+                )?;
 
                 let mut enc =
                     flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
@@ -382,7 +382,7 @@ impl AlohaImage {
                     self.height as usize,
                     &self.color_type,
                     self.bit_depth,
-                );
+                )?;
 
                 let mut enc = zstd::Encoder::new(Vec::new(), 6)?;
                 enc.write_all(&filtered)?;
@@ -390,32 +390,6 @@ impl AlohaImage {
             }
         };
 
-        /*
-        let blocks: Vec<Block> = compressed
-            .chunks(
-                self.width as usize * self.bit_depth as usize / 8
-                    * self.color_type.channels()
-                    * CHUNK_HEIGHT as usize,
-            )
-            .enumerate()
-            .map(|(i, c)| {
-                let height = u8::try_from(
-                    c.len() as u32 * 8
-                        / self.bit_depth as u32
-                        / self.color_type.channels() as u32
-                        / self.width,
-                )
-                .unwrap_or(u8::MAX);
-                Block::new(i as u32 * height as u32, height, c.to_vec())
-            })
-            .collect();
-
-        for block in &blocks {
-            writer.write_all(&(block.data.len() as u64).to_le_bytes())?;
-            writer.write_all(&block.data)?;
-            writer.write_all(&block.crc().to_le_bytes())?;
-        }
-        */
         writer.write_all(&(compressed.len() as u64).to_le_bytes())?;
         writer.write_all(&compressed)?;
         writer.write_all(&crc32fast::hash(&compressed).to_le_bytes())?;
@@ -493,7 +467,7 @@ impl AlohaImage {
             gain_map.height as usize,
             &ColorType::from_channels_count(gain_map.channels as usize)?,
             8, // bit depth for gain map is always 8
-        );
+        )?;
 
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
         enc.write_all(&filtered)?;
@@ -711,31 +685,6 @@ impl AlohaImage {
         if actual_hash != stored_hash {
             return Err(AlohaError::DecodingError("help me pls".to_owned()));
         }
-        /*
-        let mut compressed = Vec::new();
-        let last_chunk_height = u8::try_from(height % chunk_height as u32).unwrap_or(u8::MAX);
-        for i in 0..height / chunk_height as u32 + 1 {
-            let lchunk_height = if i == height - 1 {
-                chunk_height
-            } else {
-                last_chunk_height
-            };
-
-            let chunk_len = read_u64(&mut reader)?;
-            let mut chunk_bytes = vec![0u8; chunk_len as usize];
-            reader.read_exact(&mut chunk_bytes)?;
-
-            compressed.extend_from_slice(&chunk_bytes);
-
-            let mut block = Block::new(i * chunk_height as u32, lchunk_height as u8, chunk_bytes);
-
-            let stored_crc = read_u32(&mut reader)?;
-            let actual_crc = block.crc();
-            if stored_crc != actual_crc {
-                block.data.fill(255);
-            }
-        }
-        */
 
         let data = match compression {
             Compression::None => compressed.clone(),

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.1
+
+**Format Version:** 0 \
+**Date:** 2026-11-20
+
+I forgot to convert the data to little-endian. Now everything is correct.
+
 ## 0.10.0
 
 **Format Version:** 0 \

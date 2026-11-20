@@ -199,7 +199,7 @@ s = (y * width + x) * channels + c
 
 where `channels` is the channel count for the color type (see [4.1](#41-color-types)).
 Rows are laid out top to bottom, pixels within a row left to right, channels within a
-pixel in the order defined by the color type (e.g. R, G, B, A).
+pixel in the order defined by the color type (e.g. `R`, `G`, `B`, `A`).
 
 Each sample is stored as an unsigned integer of `bit_depth` bits (`8` or `16`):
 

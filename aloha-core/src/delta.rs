@@ -36,9 +36,20 @@ pub fn delta_encode(
     height: usize,
     color_type: &ColorType,
     bit_depth: u8,
-) -> Vec<u8> {
+) -> AlohaResult<Vec<u8>> {
+    let data = match bit_depth {
+        8 => data.to_vec(),
+        16 => data
+            .chunks_exact(2)
+            .flat_map(|p| u16::from_be_bytes(p.try_into().unwrap()).to_le_bytes())
+            .collect(),
+        _ => Err(AlohaError::EncodingError(format!(
+            "invalid bit depth: {bit_depth}"
+        )))?,
+    };
+
     if color_type.is_indexed() {
-        return data.to_vec();
+        return Ok(data);
     }
 
     let mut out = Vec::with_capacity(data.len() + height);
@@ -51,7 +62,7 @@ pub fn delta_encode(
         prev_row = row;
     }
 
-    out
+    Ok(out)
 }
 
 pub fn delta_decode(
@@ -62,7 +73,16 @@ pub fn delta_decode(
     bit_depth: u8,
 ) -> AlohaResult<Vec<u8>> {
     if color_type.is_indexed() {
-        return Ok(data.to_vec());
+        return Ok(match bit_depth {
+            8 => data.to_vec(),
+            16 => data
+                .chunks_exact(2)
+                .flat_map(|p| u16::from_le_bytes(p.try_into().unwrap()).to_be_bytes())
+                .collect(),
+            _ => Err(AlohaError::DecodingError(format!(
+                "invalid bit depth: {bit_depth}"
+            )))?,
+        });
     }
 
     let mut out = Vec::with_capacity(data.len() - height);
@@ -77,7 +97,16 @@ pub fn delta_decode(
         prev = raw;
     }
 
-    Ok(out)
+    Ok(match bit_depth {
+        8 => out,
+        16 => out
+            .chunks_exact(2)
+            .flat_map(|p| u16::from_le_bytes(p.try_into().unwrap()).to_be_bytes())
+            .collect(),
+        _ => Err(AlohaError::DecodingError(format!(
+            "invalid bit depth: {bit_depth}"
+        )))?,
+    })
 }
 
 fn choose_best_filter(row: &[u8], prev_row: &[u8], bpp: usize) -> Vec<u8> {
