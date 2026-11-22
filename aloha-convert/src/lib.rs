@@ -212,7 +212,7 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         },
         palette,
         transparency_palette,
-        Metadata::new()
+        Metadata::new_with_id()
             .set_title(title)
             .set_date_now()
             .set_source(format!(
@@ -375,7 +375,7 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
                 icc_profile,
                 None,
                 None,
-                Metadata::new()
+                Metadata::new_with_id()
                     .set_title(title)
                     .set_date_now()
                     .set_source(format!(
@@ -425,7 +425,7 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
         icc_profile,
         None,
         None,
-        Metadata::new()
+        Metadata::new_with_id()
             .set_title(title)
             .set_date_now()
             .set_source(format!(

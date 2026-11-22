@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.0
+
+**Format Version:** 0 \
+**Date:** 2026-11-22
+
+Now pixel data is stored in the planar format.
+
 ## 0.10.1
 
 **Format Version:** 0 \

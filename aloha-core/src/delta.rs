@@ -39,10 +39,14 @@ pub fn delta_encode(
 ) -> AlohaResult<Vec<u8>> {
     let data = match bit_depth {
         8 => data.to_vec(),
-        16 => data
-            .chunks_exact(2)
-            .flat_map(|p| u16::from_be_bytes(p.try_into().unwrap()).to_le_bytes())
-            .collect(),
+        16 => {
+            let mut converted = Vec::with_capacity(data.len());
+            for chunk in data.chunks_exact(2) {
+                let val = u16::from_be_bytes([chunk[0], chunk[1]]);
+                converted.extend_from_slice(&val.to_le_bytes());
+            }
+            converted
+        }
         _ => Err(AlohaError::EncodingError(format!(
             "invalid bit depth: {bit_depth}"
         )))?,
@@ -52,12 +56,26 @@ pub fn delta_encode(
         return Ok(data);
     }
 
+    let channels = color_type.channels();
+    let bps = bit_depth as usize / 8;
+
+    let mut planar = Vec::with_capacity(data.len());
+    for c in 0..channels * bps {
+        planar.extend_from_slice(
+            &data[c..]
+                .iter()
+                .step_by(channels)
+                .cloned()
+                .collect::<Vec<u8>>(),
+        );
+    }
+
     let mut out = Vec::with_capacity(data.len() + height);
     let mut prev_row: &[u8] = &[];
-    let bpp = (bit_depth as usize / 8) * color_type.channels();
+    let bpp = bps * channels;
 
     for y in 0..height {
-        let row = &data[y * width * bpp..(y + 1) * width * bpp];
+        let row = &planar[y * width * bpp..(y + 1) * width * bpp];
         out.extend_from_slice(&choose_best_filter(row, prev_row, bpp));
         prev_row = row;
     }
@@ -85,8 +103,9 @@ pub fn delta_decode(
         });
     }
 
+    let channels = color_type.channels();
     let mut out = Vec::with_capacity(data.len() - height);
-    let bpp = (bit_depth as usize / 8) * color_type.channels();
+    let bpp = (bit_depth as usize / 8) * channels;
     let mut prev = Vec::with_capacity(width * bpp);
 
     for y in 0..height {
@@ -97,12 +116,33 @@ pub fn delta_decode(
         prev = raw;
     }
 
+    let mut planes = Vec::with_capacity(channels);
+    let mut offset = 0;
+    let data_per_plane = out.len() / channels;
+
+    for _ in 0..channels {
+        let end = offset + data_per_plane;
+        planes.push(&out[offset..end]);
+        offset = end;
+    }
+
+    let mut interleaved = Vec::with_capacity(out.len());
+    for i in 0..data_per_plane {
+        for plane in &planes {
+            interleaved.push(plane[i]);
+        }
+    }
+
     Ok(match bit_depth {
-        8 => out,
-        16 => out
-            .chunks_exact(2)
-            .flat_map(|p| u16::from_le_bytes(p.try_into().unwrap()).to_be_bytes())
-            .collect(),
+        8 => interleaved,
+        16 => {
+            let mut converted = Vec::with_capacity(interleaved.len());
+            for chunk in interleaved.chunks_exact(2) {
+                let val = u16::from_le_bytes([chunk[0], chunk[1]]);
+                converted.extend_from_slice(&val.to_be_bytes());
+            }
+            converted
+        }
         _ => Err(AlohaError::DecodingError(format!(
             "invalid bit depth: {bit_depth}"
         )))?,

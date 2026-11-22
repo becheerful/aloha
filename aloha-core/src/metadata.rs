@@ -51,6 +51,10 @@ pub struct Metadata {
 
 impl Metadata {
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn new_with_id() -> Self {
         Self::default().set_identifier(format!("urn:uuid:{}", uuid::Uuid::now_v7()))
     }
 
