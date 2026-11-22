@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0
+
+**Format Version:** 0 \
+**Date:** 2026-11-23
+
+Added CMYK color type.
+
 ## 0.11.1
 
 **Format Version:** 0 \

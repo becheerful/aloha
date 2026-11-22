@@ -14,18 +14,19 @@ use aloha_core::{
 };
 
 mod png_conv {
-    pub(crate) fn color_type_from_aloha(ct: &super::ColorType) -> png::ColorType {
+    pub(crate) fn color_type_from_aloha(ct: &super::ColorType) -> anyhow::Result<png::ColorType> {
         use super::ColorType;
         use png::ColorType::*;
 
-        match ct {
+        anyhow::Ok(match ct {
             ColorType::Grayscale => Grayscale,
             ColorType::GrayscaleAlpha => GrayscaleAlpha,
             ColorType::Rgb => Rgb,
             ColorType::Rgba => Rgba,
             ColorType::Indexed => Indexed,
             ColorType::IndexedAlpha => Indexed,
-        }
+            _ => anyhow::bail!("Unsupported color type: {ct:?}"),
+        })
     }
 
     pub(crate) fn color_type_to_aloha(ct: &png::ColorType, has_trns: bool) -> super::ColorType {
@@ -47,40 +48,38 @@ mod png_conv {
 }
 
 mod jpeg_conv {
-    use anyhow::{Result, bail};
-
-    pub(crate) fn color_type_from_aloha(ct: &super::ColorType) -> Result<jpeg_encoder::ColorType> {
+    pub(crate) fn color_type_from_aloha(
+        ct: &super::ColorType,
+    ) -> anyhow::Result<jpeg_encoder::ColorType> {
         use super::ColorType;
         use jpeg_encoder::ColorType::*;
 
         Ok(match ct {
             ColorType::Grayscale => Luma,
             ColorType::Rgb => Rgb,
-            _ => bail!("Unsupported color type: {}", *ct as u8),
+            ColorType::Cmyk => Cmyk,
+            _ => anyhow::bail!("Unsupported color type: {}", *ct as u8),
         })
     }
 
-    pub(crate) fn pixel_format_to_aloha(
-        pf: &jpeg_decoder::PixelFormat,
-    ) -> Result<super::ColorType> {
-        use super::ColorType::*;
+    pub(crate) fn pixel_format_to_aloha(pf: &jpeg_decoder::PixelFormat) -> super::ColorType {
+        use super::ColorType;
         use jpeg_decoder::PixelFormat::*;
 
-        Ok(match pf {
-            L8 => Grayscale,
-            L16 => Grayscale,
-            RGB24 => Rgb,
-            _ => bail!("Unsupported pixel format: {pf:?}"),
-        })
+        match pf {
+            L8 => ColorType::Grayscale,
+            L16 => ColorType::Grayscale,
+            RGB24 => ColorType::Rgb,
+            CMYK32 => ColorType::Cmyk,
+        }
     }
 
-    pub(crate) fn bit_depth_to_aloha(value: &jpeg_decoder::PixelFormat) -> Result<u8> {
+    pub(crate) fn bit_depth_to_aloha(value: &jpeg_decoder::PixelFormat) -> u8 {
         use jpeg_decoder::PixelFormat::*;
-        Ok(match value {
-            L8 | RGB24 => 8,
+        match value {
+            L8 | RGB24 | CMYK32 => 8,
             L16 => 16,
-            other => bail!("Unsupported pixel format: {other:?}"),
-        })
+        }
     }
 }
 
@@ -236,7 +235,7 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
 
     let mut info = png::Info::with_size(image.width, image.height);
 
-    info.color_type = png_conv::color_type_from_aloha(&image.color_type);
+    info.color_type = png_conv::color_type_from_aloha(&image.color_type)?;
     info.bit_depth = match image.bit_depth {
         8 => png::BitDepth::Eight,
         16 => png::BitDepth::Sixteen,
@@ -368,8 +367,8 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
             let image = AlohaImage::new(
                 sdr_info.width as u32,
                 sdr_info.height as u32,
-                jpeg_conv::pixel_format_to_aloha(&sdr_info.pixel_format)?,
-                jpeg_conv::bit_depth_to_aloha(&sdr_info.pixel_format)?,
+                jpeg_conv::pixel_format_to_aloha(&sdr_info.pixel_format),
+                jpeg_conv::bit_depth_to_aloha(&sdr_info.pixel_format),
                 aloha_core::Compression::DeltaZstd,
                 None,
                 icc_profile,
@@ -418,8 +417,8 @@ pub fn jpeg_to_aloha(jpeg_path: &Path, aloha_path: &Path) -> Result<()> {
     let image = AlohaImage::new(
         info.width as u32,
         info.height as u32,
-        jpeg_conv::pixel_format_to_aloha(&info.pixel_format)?,
-        jpeg_conv::bit_depth_to_aloha(&info.pixel_format)?,
+        jpeg_conv::pixel_format_to_aloha(&info.pixel_format),
+        jpeg_conv::bit_depth_to_aloha(&info.pixel_format),
         aloha_core::Compression::DeltaZstd,
         None,
         icc_profile,

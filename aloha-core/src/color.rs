@@ -45,6 +45,8 @@ pub enum ColorType {
     Rgb,
     /// Red, green, blue, and alpha channels.
     Rgba,
+    /// Cyan, magenta, yellow, key/black channels.
+    Cmyk,
     /// Each sample is an index into a color palette.
     Indexed,
     /// Each sample is an index into a color palette and a transparency palette.
@@ -60,7 +62,7 @@ impl ColorType {
     ///
     /// Returns [`AlohaError::InvalidChannelsCount`] if `channels` is 0 or greater than 4,
     /// or if the count does not map to a supported non-indexed layout.
-    pub fn from_channels_count(channels: usize) -> AlohaResult<Self> {
+    pub(crate) fn from_channels_count(channels: usize) -> AlohaResult<Self> {
         Ok(match channels {
             1 => Self::Grayscale,
             2 => Self::GrayscaleAlpha,
@@ -78,7 +80,7 @@ impl ColorType {
             Self::Grayscale | Self::Indexed => 1,
             Self::GrayscaleAlpha | Self::IndexedAlpha => 2,
             Self::Rgb => 3,
-            Self::Rgba => 4,
+            Self::Rgba | Self::Cmyk => 4,
         }
     }
 
@@ -102,8 +104,9 @@ impl TryFrom<u8> for ColorType {
             1 => Self::GrayscaleAlpha,
             2 => Self::Rgb,
             3 => Self::Rgba,
-            4 => Self::Indexed,
-            5 => Self::IndexedAlpha,
+            4 => Self::Cmyk,
+            5 => Self::Indexed,
+            6 => Self::IndexedAlpha,
             _ => Err(AlohaError::DecodingError(format!(
                 "invalid color type: {value}"
             )))?,

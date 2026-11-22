@@ -14,6 +14,7 @@ mod utils;
 struct AlohaViewer {
     locale: String,
     file_name: String,
+    file_size: Option<String>,
     texture: Option<egui::TextureHandle>,
     image_path: Option<std::path::PathBuf>,
     error: Option<String>,
@@ -37,6 +38,7 @@ impl AlohaViewer {
         Self {
             locale: locale.clone(),
             file_name: t!("file-not-selected", locale = locale).into_owned(),
+            file_size: None,
             texture: None,
             image_path: path.map(|s| std::path::PathBuf::from(s)),
             error: None,
@@ -61,7 +63,7 @@ impl AlohaViewer {
             }
         };
 
-        match aloha_core::AlohaImage::read_from(std::io::BufReader::new(file)) {
+        match aloha_core::AlohaImage::read_from(std::io::BufReader::new(&file)) {
             Ok(mut image) => match utils::aloha_to_rgba8(&mut image) {
                 Ok(data) => {
                     let color = egui::ColorImage::from_rgba_unmultiplied(
@@ -91,6 +93,10 @@ impl AlohaViewer {
                         .and_then(|s| s.to_str())
                         .unwrap_or("?")
                         .to_owned();
+                    self.file_size = file
+                        .metadata()
+                        .ok()
+                        .map(|md| utils::format_bytes_iec(md.len()));
                     self.image_path = Some(path.to_path_buf());
                     self.error = None;
                 }
@@ -502,6 +508,11 @@ impl eframe::App for AlohaViewer {
                     ui.separator();
                     if ui.button(t!("metadata", locale = &self.locale)).clicked() {
                         self.show_metadata = !self.show_metadata;
+                    }
+
+                    if let Some(file_size) = &self.file_size {
+                        ui.separator();
+                        ui.label(file_size);
                     }
                 });
             });

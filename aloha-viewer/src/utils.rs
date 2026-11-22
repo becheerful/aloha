@@ -33,6 +33,25 @@ pub fn xmp_value_to_string(value: &XmpValue) -> String {
     }
 }
 
+const UNITS: [&str; 8] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB"];
+const STEP: f32 = 1024.0;
+
+pub fn format_bytes_iec(bytes: u64) -> String {
+    let mut bytes = bytes as f32;
+    let mut unit_index = 0;
+
+    while bytes >= STEP && unit_index < UNITS.len() - 1 {
+        bytes /= STEP;
+        unit_index += 1;
+    }
+
+    format!("{:.2}", bytes)
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+        + UNITS[unit_index]
+}
+
 fn to8(v: u16, bps: usize) -> u8 {
     if bps == 1 { v as u8 } else { (v / 256) as u8 }
 }
@@ -122,6 +141,19 @@ pub fn aloha_to_rgba8(image: &aloha_core::AlohaImage) -> Result<Vec<u8>, String>
                     to8(samples[2], bps),
                     to8(samples[3], bps),
                 ]);
+            }
+
+            Cmyk => {
+                let c = to8(samples[0], bps) as f32 / 255.0;
+                let m = to8(samples[1], bps) as f32 / 255.0;
+                let y = to8(samples[2], bps) as f32 / 255.0;
+                let k = to8(samples[3], bps) as f32 / 255.0;
+
+                let r = 255.0 * (1.0 - c) * (1.0 - k);
+                let g = 255.0 * (1.0 - m) * (1.0 - k);
+                let b = 255.0 * (1.0 - y) * (1.0 - k);
+
+                out.extend_from_slice(&[r as u8, g as u8, b as u8]);
             }
 
             Indexed | IndexedAlpha => unreachable!(),
