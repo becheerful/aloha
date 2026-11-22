@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.1
+
+**Format Version:** 0 \
+**Date:** 2026-11-23
+
+Gain map is now compressed with zstd.
+
 ## 0.11.0
 
 **Format Version:** 0 \

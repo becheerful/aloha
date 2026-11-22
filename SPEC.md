@@ -190,24 +190,30 @@ However, the `crc` MUST be present in any case.
 
 ### 10.1 Representation
 
-Samples are stored in **pixel-interleaved** order: for a pixel at `(x, y)` and channel `c`,
-the sample index is
+Samples are stored in **planar** order: all samples for a single channel are grouped together.
+For a pixel at `(x, y)` and channel `c`, the sample index within its specific channel plane is:
 
 ```text
-s = (y * width + x) * channels + c
+s = y * width + x
 ```
 
-where `channels` is the channel count for the color type (see [4.1](#41-color-types)).
-Rows are laid out top to bottom, pixels within a row left to right, channels within a
-pixel in the order defined by the color type (e.g. `R`, `G`, `B`, `A`).
+The full data stream consists of consecutive planes laid out in the order defined by the color
+type (e.g. `R` plane, then `G` plane, then `B` plane, then `A` plane). The starting byte offset
+for a given channel `c` is:
+
+```text
+offset_c = c * width * height * bytes_per_sample
+```
+
+Rows are laid out top to bottom, and pixels within a row are ordered left to right.
+
+where `bytes_per_sample` is `bit_depth` divided by 8. The absolute byte index of a sample in
+the full stream is `offset_c + s * bytes_per_sample`.
 
 Each sample is stored as an unsigned integer of `bit_depth` bits (`8` or `16`):
 
 - `bit_depth == 8`: one byte per sample.
 - `bit_depth == 16`: two bytes per sample, **little-endian**.
-
-A sample's value is in the range `[0, 2^bit_depth - 1]`; the mask `2^bit_depth - 1` is
-reffered to below as `sample_mask`.
 
 ### 10.2 Delta coding
 
@@ -309,8 +315,7 @@ The gain map pixel data is **always** 8-bit per channel and is processed as foll
 1. Delta encoding is applied per row (same algorithm as in [10.2](#102-delta-coding)), regardless of the
 main image's `compression` value.
 
-2. The delta-coded buffer is compressed with zlib (`flate2::Compression::best()`), regardless of the main
-image's `compression` value.
+2. The delta-coded buffer is compressed with zstd, regardless of the main image's `compression` value.
 
 During decoding, the compressed data is first decompressed with zlib, then delta-decoded using the gain
 map's own `width`, `height`, and channel count (width `bit_depth` = `8`).

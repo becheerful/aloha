@@ -469,7 +469,7 @@ impl AlohaImage {
             8, // bit depth for gain map is always 8
         )?;
 
-        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut enc = zstd::Encoder::new(Vec::new(), 6)?;
         enc.write_all(&filtered)?;
         let compressed = enc.finish()?;
 
@@ -778,7 +778,7 @@ impl AlohaImage {
             reader.read_exact(&mut gain_map_bytes)?;
             hasher.update(&gain_map_bytes);
 
-            let mut dec = flate2::read::ZlibDecoder::new(gain_map_bytes.as_slice());
+            let mut dec = zstd::Decoder::new(gain_map_bytes.as_slice())?;
             let mut filtered = Vec::new();
             dec.read_to_end(&mut filtered)?;
 
