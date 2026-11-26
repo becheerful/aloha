@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use crc32fast::Hasher;
 
 use crate::{
-    color::{ColorProfileDesc, ColorType},
+    color::ColorType,
     delta::{delta_decode, delta_encode},
     error::{AlohaError, AlohaResult},
     metadata::Metadata,
@@ -67,15 +67,11 @@ pub struct AlohaImage {
     ///
     /// For `Indexed` and `IndexedAlpha` color types this value must not exceed 8.
     pub bit_depth: u8,
-    /// Describes which color profile representation is used (`CICP`, `ICC` or none).
-    pub color_profile_desc: ColorProfileDesc,
     /// The compression algorithm applied to the pixel data.
     pub compression: Compression,
-    /// Whether the image contains an optional gain map.
-    pub has_gain_map: bool,
-    /// The CICP color profile, required when `color_profile_desc` is [`ColorProfileDesc::Cicp`].
+    /// The optional CICP.
     pub cicp: Option<zencodec::Cicp>,
-    /// The raw ICC profile bytes, required when `color_profile_desc` is [`ColorProfileDesc::Icc`].
+    /// The optional raw ICC profile bytes.
     pub icc_profile: Option<Vec<u8>>,
     /// The color palette, required when `color_type` is `Indexed` (4) or `IndexedAlpha` (5).
     pub palette: Option<Vec<u8>>,
@@ -117,15 +113,7 @@ impl AlohaImage {
             height,
             color_type,
             bit_depth,
-            color_profile_desc: if cicp.is_some() {
-                ColorProfileDesc::Cicp
-            } else if icc_profile.is_some() {
-                ColorProfileDesc::Icc
-            } else {
-                ColorProfileDesc::None
-            },
             compression,
-            has_gain_map: gain_map_metadata.is_some() && gain_map.is_some(),
             cicp,
             icc_profile,
             palette,
@@ -184,36 +172,11 @@ impl AlohaImage {
             }
         }
 
-        if matches!(self.color_profile_desc, ColorProfileDesc::Cicp) {
-            if self.icc_profile.is_some() {
-                return Err(AlohaError::ValidationError(
-                    "image uses the CICP but the ICC profile isn't empty".to_owned(),
-                ));
-            }
-        }
-
-        if matches!(self.color_profile_desc, ColorProfileDesc::Icc) {
-            if self.cicp.is_some() {
-                return Err(AlohaError::ValidationError(
-                    "image uses the ICC profile but the CICP isn't empty".to_owned(),
-                ));
-            }
-        }
-
-        if matches!(self.color_profile_desc, ColorProfileDesc::None) {
-            if self.cicp.is_some() {
-                return Err(AlohaError::ValidationError(
-                    "image does not use any color profile descriptor but the CICP isn't empty"
-                        .to_owned(),
-                ));
-            }
-
-            if self.icc_profile.is_some() {
-                return Err(AlohaError::ValidationError(
-                    "image does not use any color profile descriptor but the ICC profile isn't empty"
-                        .to_owned()
-                ));
-            }
+        if self.bit_depth != 8 && self.bit_depth != 16 {
+            return Err(AlohaError::ValidationError(format!(
+                "invalid bit depth: {}",
+                self.bit_depth
+            )));
         }
 
         let actual_size = self.data.len();
@@ -243,9 +206,13 @@ impl AlohaImage {
                     "the gain map's data size {actual_size} does not match the expected {expected_size}"
                 )));
             }
-        }
 
-        if let Some(gain_map_metadata) = &self.gain_map_metadata {
+            let Some(gain_map_metadata) = &self.gain_map_metadata else {
+                return Err(AlohaError::ValidationError(format!(
+                    "image must have a gain map metadata but it's absent"
+                )))?;
+            };
+
             gain_map_metadata.validate()?;
         }
 
@@ -265,9 +232,10 @@ impl AlohaImage {
             &[
                 self.color_type as u8,
                 self.bit_depth,
-                self.color_profile_desc as u8,
                 self.compression as u8,
-                self.has_gain_map as u8,
+                self.cicp.is_some() as u8,
+                self.icc_profile.is_some() as u8,
+                self.gain_map.is_some() as u8,
             ],
             writer,
             &mut hasher,
@@ -278,63 +246,41 @@ impl AlohaImage {
     }
 
     fn write_color_profile(&self, writer: &mut impl Write) -> AlohaResult {
-        let mut hasher = Hasher::new();
-
         // Writing the CICP section
-        if matches!(self.color_profile_desc, ColorProfileDesc::Cicp) {
-            let Some(cicp) = &self.cicp else {
-                return Err(AlohaError::EncodingError(
-                    "image must have coding-independent code points but they're absent".to_owned(),
-                ));
-            };
+        if let Some(cicp) = &self.cicp {
+            let buf = [
+                cicp.color_primaries,
+                cicp.transfer_characteristics,
+                cicp.matrix_coefficients,
+                cicp.full_range as u8,
+            ];
 
-            write_bytes(
-                &[
-                    cicp.color_primaries,
-                    cicp.transfer_characteristics,
-                    cicp.matrix_coefficients,
-                    cicp.full_range as u8,
-                ],
-                writer,
-                &mut hasher,
-            )?;
+            writer.write_all(&buf)?;
+            writer.write_all(&crc32fast::hash(&buf).to_le_bytes())?;
         }
 
         // Writing the ICC profile section
-        if matches!(self.color_profile_desc, ColorProfileDesc::Icc) {
-            let Some(icc) = &self.icc_profile else {
-                return Err(AlohaError::EncodingError(
-                    "image must have an ICC profile but it's absent".to_owned(),
-                ));
-            };
-
+        if let Some(icc) = &self.icc_profile {
             writer.write_all(&(icc.len() as u32).to_le_bytes())?;
-            write_bytes(icc, writer, &mut hasher)?;
+            writer.write_all(icc)?;
+            writer.write_all(&crc32fast::hash(icc).to_le_bytes())?;
         }
 
-        writer.write_all(&hasher.finalize().to_le_bytes())?;
         Ok(())
     }
 
     fn write_palette(&self, writer: &mut impl Write) -> AlohaResult {
         let mut hasher = Hasher::new();
 
-        let Some(p) = &self.palette else {
-            return Err(AlohaError::EncodingError(
-                "image must have a color palette but it's absent".to_owned(),
-            ));
-        };
+        // `.unwrap()` here is safe because this function is called after the validation
+        let p = self.palette.as_ref().unwrap();
 
         writer.write_all(&(p.len() as u16).to_le_bytes())?;
         write_bytes(p, writer, &mut hasher)?;
 
         if self.color_type.has_alpha() {
-            let Some(tp) = &self.transparency_palette else {
-                return Err(AlohaError::EncodingError(
-                    "image must have a transparency palette but it's absent".to_owned(),
-                ));
-            };
-
+            // `.unwrap()` here is safe because this function is called after the validation
+            let tp = self.transparency_palette.as_ref().unwrap();
             writer.write_all(&[tp.len() as u8])?;
             write_bytes(tp, writer, &mut hasher)?;
         }
@@ -401,11 +347,8 @@ impl AlohaImage {
         let mut hasher = Hasher::new();
 
         // Writing the gain map metadata section
-        let Some(gain_map_params) = &self.gain_map_metadata else {
-            return Err(AlohaError::EncodingError(
-                "image must have a gain map metadata but it's absent".to_owned(),
-            ));
-        };
+        // `.unwrap()` here is safe because this functions is called after the validation
+        let gain_map_params = self.gain_map_metadata.as_ref().unwrap();
 
         for i in 0..3 {
             write_bytes(
@@ -455,11 +398,8 @@ impl AlohaImage {
         // Writing the gain map section
         let mut hasher = Hasher::new();
 
-        let Some(gain_map) = &self.gain_map else {
-            return Err(AlohaError::EncodingError(
-                "image must have a gain map but it's absent".to_owned(),
-            ));
-        };
+        // `.unwrap()` here is safe because this function is called only when the gain map is some
+        let gain_map = self.gain_map.as_ref().unwrap();
 
         let filtered = delta_encode(
             &gain_map.data,
@@ -504,10 +444,7 @@ impl AlohaImage {
         self.validate()?;
 
         self.write_header(&mut writer)?;
-
-        if !matches!(self.color_profile_desc, ColorProfileDesc::None) {
-            self.write_color_profile(&mut writer)?;
-        }
+        self.write_color_profile(&mut writer)?;
 
         if self.color_type.is_indexed() {
             self.write_palette(&mut writer)?;
@@ -516,7 +453,7 @@ impl AlohaImage {
         self.write_metadata(&mut writer)?;
         self.write_data(&mut writer)?;
 
-        if self.has_gain_map {
+        if self.gain_map.is_some() {
             self.write_gain_map(&mut writer)?;
         }
 
@@ -560,15 +497,16 @@ impl AlohaImage {
         let width = read_u32_hash(&mut reader, &mut header_hasher)?;
         let height = read_u32_hash(&mut reader, &mut header_hasher)?;
 
-        let mut buf = [0u8; 5];
+        let mut buf = [0u8; 6];
         reader.read_exact(&mut buf)?;
         header_hasher.update(&buf);
 
         let color_type = ColorType::try_from(buf[0])?;
         let bit_depth = buf[1];
-        let color_profile_desc = ColorProfileDesc::try_from(buf[2])?;
-        let compression = Compression::try_from(buf[3])?;
-        let has_gain_map = buf[4] != 0;
+        let compression = Compression::try_from(buf[2])?;
+        let has_cicp = buf[3] != 0;
+        let has_icc = buf[4] != 0;
+        let has_gain_map = buf[5] != 0;
 
         let stored_crc = read_u32(&mut reader)?;
         let actual_crc = header_hasher.finalize();
@@ -579,52 +517,49 @@ impl AlohaImage {
         }
 
         // Reading the color profile section
-        let mut cicp = None;
-        let mut icc_profile = None;
+        let cicp = if has_cicp {
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf)?;
 
-        match color_profile_desc {
-            ColorProfileDesc::None => { /* do nothing */ }
+            let color_primaries = buf[0];
+            let transfer_characteristics = buf[1];
+            let matrix_coefficients = buf[2];
+            let full_range = buf[3] != 0;
 
-            ColorProfileDesc::Cicp => {
-                let mut buf = [0u8; 4];
-                reader.read_exact(&mut buf)?;
-
-                let color_primaries = buf[0];
-                let transfer_characteristics = buf[1];
-                let matrix_coefficients = buf[2];
-                let full_range = buf[3] != 0;
-
-                cicp = Some(zencodec::Cicp::new(
-                    color_primaries,
-                    transfer_characteristics,
-                    matrix_coefficients,
-                    full_range,
-                ));
-
-                let stored_crc = read_u32(&mut reader)?;
-                let actual_crc = crc32fast::hash(&buf);
-                if stored_crc != actual_crc {
-                    return Err(AlohaError::DecodingError(format!(
-                        "the CICP's checksum does not match: {actual_crc:08x} (actual) =/= {stored_crc:08x} (stored)"
-                    )));
-                }
+            let stored_crc = read_u32(&mut reader)?;
+            let actual_crc = crc32fast::hash(&buf);
+            if stored_crc != actual_crc {
+                return Err(AlohaError::DecodingError(format!(
+                    "the CICP's checksum does not match: {actual_crc:08x} (actual) =/= {stored_crc:08x} (stored)"
+                )));
             }
 
-            ColorProfileDesc::Icc => {
-                let mut icc_bytes = vec![0u8; read_u32(&mut reader)? as usize];
-                reader.read_exact(&mut icc_bytes)?;
-                let actual_crc = crc32fast::hash(&icc_bytes);
+            Some(zencodec::Cicp::new(
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                full_range,
+            ))
+        } else {
+            None
+        };
 
-                icc_profile = Some(icc_bytes);
+        let icc_profile = if has_icc {
+            let mut icc_bytes = vec![0u8; read_u32(&mut reader)? as usize];
+            reader.read_exact(&mut icc_bytes)?;
 
-                let stored_crc = read_u32(&mut reader)?;
-                if stored_crc != actual_crc {
-                    return Err(AlohaError::DecodingError(format!(
-                        "the ICC profile's checksum does not match: {actual_crc:08x} (actual) =/= {stored_crc:08x} (stored)"
-                    )));
-                }
+            let stored_crc = read_u32(&mut reader)?;
+            let actual_crc = crc32fast::hash(&icc_bytes);
+            if stored_crc != actual_crc {
+                return Err(AlohaError::DecodingError(format!(
+                    "the ICC profile's checksum does not match: {actual_crc:08x} (actual) =/= {stored_crc:08x} (stored)"
+                )));
             }
-        }
+
+            Some(icc_bytes)
+        } else {
+            None
+        };
 
         // Reading the palette section
         let mut palette = None;
@@ -683,7 +618,9 @@ impl AlohaImage {
         let stored_hash = read_u32(&mut reader)?;
         let actual_hash = crc32fast::hash(&compressed);
         if actual_hash != stored_hash {
-            return Err(AlohaError::DecodingError("help me pls".to_owned()));
+            return Err(AlohaError::DecodingError(format!(
+                "the compressed pixel data's checksum does not match: {actual_crc:08x} (actual) =/= {stored_crc:08x} (stored)"
+            )));
         }
 
         let data = match compression {
@@ -811,9 +748,7 @@ impl AlohaImage {
             height,
             color_type,
             bit_depth,
-            color_profile_desc,
             compression,
-            has_gain_map,
             cicp,
             icc_profile,
             palette,

@@ -7,11 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use aloha_core::{
-    AlohaImage,
-    color::{ColorProfileDesc, ColorType},
-    metadata::Metadata,
-};
+use aloha_core::{AlohaImage, color::ColorType, metadata::Metadata};
 
 mod png_conv {
     pub(crate) fn color_type_from_aloha(ct: &super::ColorType) -> anyhow::Result<png::ColorType> {
@@ -242,11 +238,7 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         other => bail!("Invalid bit depth: {other}"),
     };
 
-    if matches!(image.color_profile_desc, ColorProfileDesc::Cicp) {
-        let Some(cicp) = &image.cicp else {
-            bail!("Image must have coding-independent code points but they're absent")
-        };
-
+    if let Some(cicp) = &image.cicp {
         info.coding_independent_code_points = Some(png::CodingIndependentCodePoints {
             color_primaries: cicp.color_primaries,
             transfer_function: cicp.transfer_characteristics,
@@ -255,11 +247,7 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         });
     }
 
-    if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
-        let Some(icc) = &image.icc_profile else {
-            bail!("Image must have an ICC profile but it's absent");
-        };
-
+    if let Some(icc) = &image.icc_profile {
         info.icc_profile = Some(std::borrow::Cow::Borrowed(icc));
     }
 
@@ -267,18 +255,13 @@ pub fn aloha_to_png(aloha_path: &Path, png_path: &Path) -> Result<()> {
         info.palette = Some(std::borrow::Cow::Borrowed(p));
     }
 
-    let hdr_data = if image.has_gain_map {
+    let hdr_data = if let Some(gain_map) = &image.gain_map {
         let Some(cicp) = &image.cicp else {
             bail!("Image must have coding-independent code points but they're absent");
         };
 
-        let Some(gain_map) = &image.gain_map else {
-            bail!("Image must have a gain map but it's absent");
-        };
-
-        let Some(metadata) = &image.gain_map_metadata else {
-            bail!("Image must have a gain map metadata but it's absent");
-        };
+        // `.unwrap()` here is safe because the image has passed the validation
+        let metadata = image.gain_map_metadata.as_ref().unwrap();
 
         use ultrahdr_core::PixelFormat::*;
         Some(ultrahdr_core::gainmap::apply_gainmap(
@@ -450,14 +433,9 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
 
     let color_type = jpeg_conv::color_type_from_aloha(&image.color_type)?;
 
-    if image.has_gain_map {
-        let Some(gain_map) = &image.gain_map else {
-            bail!("Image must have a gain map but it's absent");
-        };
-
-        let Some(gain_map_metadata) = &image.gain_map_metadata else {
-            bail!("Image must have a gain map metadata but it's absent");
-        };
+    if let Some(gain_map) = &image.gain_map {
+        // `.unwrap()` here is safe because the image has passed the validation
+        let gain_map_metadata = image.gain_map_metadata.as_ref().unwrap();
 
         let mut sdr_jpeg = Vec::new();
         let mut sdr_enc = jpeg_encoder::Encoder::new(&mut sdr_jpeg, 90);
@@ -476,6 +454,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
         let gm_color = match gain_map.channels {
             1 => jpeg_encoder::ColorType::Luma,
             3 => jpeg_encoder::ColorType::Rgb,
+            4 => jpeg_encoder::ColorType::Cmyk,
             other => bail!("Unsupported channels count: {other}"),
         };
 
@@ -500,11 +479,7 @@ pub fn aloha_to_jpeg(aloha_path: &Path, jpeg_path: &Path) -> Result<()> {
 
     let mut enc = jpeg_encoder::Encoder::new_file(jpeg_path, 90)?;
 
-    if matches!(image.color_profile_desc, ColorProfileDesc::Icc) {
-        let Some(icc) = &image.icc_profile else {
-            bail!("Image must have an ICC profile but it's absent");
-        };
-
+    if let Some(icc) = &image.icc_profile {
         enc.add_icc_profile(icc)?;
     }
 

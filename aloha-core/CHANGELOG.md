@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.0
+
+**Format Version:** 0 \
+**Date:** 2026-11-26
+
+Now CICP and ICC do not exclude each other.
+Changed header's fields.
+
 ## 0.12.0
 
 **Format Version:** 0 \

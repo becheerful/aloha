@@ -6,33 +6,6 @@
 
 use crate::error::{AlohaError, AlohaResult};
 
-/// Describes how the color profile of an image is represented.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorProfileDesc {
-    /// No color profile is present.
-    None,
-    /// The color profile is stored as CICP (Coding-Independent Code Points)
-    Cicp,
-    /// The color profile is stored as raw ICC profile bytes.
-    Icc,
-}
-
-impl TryFrom<u8> for ColorProfileDesc {
-    type Error = AlohaError;
-
-    fn try_from(value: u8) -> AlohaResult<Self> {
-        Ok(match value {
-            0 => Self::None,
-            1 => Self::Cicp,
-            2 => Self::Icc,
-            _ => Err(AlohaError::DecodingError(format!(
-                "invalid color profile's descriptor: {value}"
-            )))?,
-        })
-    }
-}
-
 /// Describes the channel layout and meaning of the pixel data.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

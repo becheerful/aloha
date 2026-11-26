@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "aloha-convert"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "aloha-core",
  "anyhow",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "aloha-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "chrono",
  "crc32fast",

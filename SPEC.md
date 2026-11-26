@@ -45,18 +45,19 @@ only if the corresponding flags or descriptros indicate so.
 
 ## 4. Header
 
-| Offset | Size | Field                | Description                                                      |
-|--------|------|----------------------|------------------------------------------------------------------|
-| 0      | 5    | `magic`              | ASCII `"ALOHA"` (0x41 0x4C 0x4F 0x48 0x41)                       |
-| 5      | 2    | `version`            | Format version, `u16`.                                           |
-| 7      | 4    | `width`              | Image width in pixels, `u32`. MUST be $\geq$ 1.                  |
-| 11     | 4    | `height`             | Image height in pixels, `u32`. MUST be $\geq$ 1.                 |
-| 15     | 1    | `color_type`         | See [4.1](#41-color-types).                                      |
-| 16     | 1    | `bit_depth`          | Bits per channel: `8` or `16`.                                   |
-| 17     | 1    | `color_profile_desc` | See [4.2](#42-color-profile-descriptor).                         |
-| 18     | 1    | `compression`        | See [4.3](#43-compression-algorithms).                           |
-| 19     | 1    | `has_gain_map`       | `0` = no gain map, `1` = gain map section follow the pixel data. |
-| 20     | 4    | `crc`                | Header's checksum, computed with the `crc32fast` crate.          |
+| Offset | Size | Field                | Description                                                              |
+|--------|------|----------------------|--------------------------------------------------------------------------|
+| 0      | 5    | `magic`              | ASCII `"ALOHA"` (0x41 0x4C 0x4F 0x48 0x41)                               |
+| 5      | 2    | `version`            | Format version, `u16`.                                                   |
+| 7      | 4    | `width`              | Image width in pixels, `u32`. MUST be $\geq$ 1.                          |
+| 11     | 4    | `height`             | Image height in pixels, `u32`. MUST be $\geq$ 1.                         |
+| 15     | 1    | `color_type`         | See [4.1](#41-color-types).                                              |
+| 16     | 1    | `bit_depth`          | Bits per channel: `8` or `16`.                                           |
+| 18     | 1    | `compression`        | See [4.3](#42-compression-algorithms).                                   |
+| 19     | 1    | `has_cicp`           | `0` = no CICP, `1` = CICP section follow the header.                     |
+| 20     | 1    | `has_icc`            | `0` = no ICC, `1` = ICC section follow the CICP section (or the header). |
+| 21     | 1    | `has_gain_map`       | `0` = no gain map, `1` = gain map section follow the pixel data.         |
+| 22     | 4    | `crc`                | Header's checksum, computed with the `crc32fast` crate.                  |
 
 ### 4.1 Color types
 
@@ -68,24 +69,13 @@ An 8-bit unsigned integer that represents the image's color model.
 | 1     | GrayscaleAlpha | 2        | Gray + alpha.                                                          |
 | 2     | Rgb            | 3        | Red, green, blue.                                                      |
 | 3     | Rgba           | 4        | Red, green, blue, alpha.                                               |
+| 4     | Cmyk           | 4        | Cyan, magenta, yellow, key/black.                                      |
 | 4     | Indexed        | 1        | Palette index; palette section required.                               |
 | 5     | IndexedAlpha   | 2        | Index in palettes; palette and transparency palette sections required. |
 
 Values `6`—`255` are invalid and MUST be rejected.
 
-### 4.2 Color Profile Descriptor
-
-An 8-bit unsigned integer indicating the type of color profile information present.
-
-| Value | Name | Description                                            |
-|-------|------|--------------------------------------------------------|
-| 0     | None | No color profile section follows.                      |
-| 1     | Cicp | A CICP section immediately follows the header.         |
-| 2     | Icc  | An ICC profile section immediately follows the header. |
-
-Values `3`—`255` are invalid and MUST be rejected.
-
-### 4.3 Compression algorithms
+### 4.2 Compression algorithms
 
 An 8-bit unsigned integer that represents the pixel data compression algotithm being used.
 
