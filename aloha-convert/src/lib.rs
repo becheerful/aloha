@@ -162,8 +162,14 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         let sdr_data = ultrahdr_core::color::tonemap_image_to_srgb8(&hdr_image, gamut)?;
         data = sdr_data.clone();
 
-        let sdr_image =
-            ultrahdr_core::RawImage::from_data(width, height, format, gamut, transfer, sdr_data)?;
+        let sdr_image = ultrahdr_core::RawImage::from_data(
+            width,
+            height,
+            format,
+            ultrahdr_rs::ColorGamut::default(),
+            ultrahdr_core::ColorTransfer::default(),
+            sdr_data,
+        )?;
 
         (gain_map, gain_map_metadata) = Some(ultrahdr_core::gainmap::compute_gainmap(
             &hdr_image,
@@ -200,11 +206,7 @@ pub fn png_to_aloha(png_path: &Path, aloha_path: &Path) -> Result<()> {
         },
         aloha_core::Compression::DeltaZstd,
         aloha_cicp,
-        if aloha_cicp.is_none() {
-            icc_profile
-        } else {
-            None
-        },
+        icc_profile,
         palette,
         transparency_palette,
         Metadata::new_with_id()
